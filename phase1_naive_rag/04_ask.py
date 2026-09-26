@@ -6,13 +6,17 @@ Run: uv run python -m phase1_naive_rag.04_ask                                   
 
 "Naive" = no query rewriting, no hybrid search, no reranking, no filters. The demo questions are
 picked so you can SEE where it breaks; later phases fix each failure.
+
+Every question is traced (data/traces/, view with 06_traces) and its answer passes through
+output guardrails (common/guardrails.py, demo in 05_guardrails_demo).
 """
 import argparse
-import re
 
-from common.config import CHAT_MODEL
-from common.llm import chat
-from common.store import collection_name, get_collection, search
+from common.config import CHAT_MODEL, EMBED_MODEL
+from common.guardrails import check_answer
+from common.llm import chat_completion, embed_query
+from common.store import collection_name, get_collection, search_by_vector
+from common.trace import Trace, cost_usd
 
 SYSTEM = """You answer questions about SEC 10-K filings using ONLY the numbered context passages.
 Rules:
@@ -41,13 +45,35 @@ def format_context(hits: list[dict]) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
-def ask(col, question: str, k: int = 5) -> tuple[str, list[dict]]:
-    hits = search(col, question, k=k)
-    messages = [
-        {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": f"Context:\n\n{format_context(hits)}\n\nQuestion: {question}"},
-    ]
-    return chat(messages), hits
+def ask(col, question: str, k: int = 5) -> tuple[str, list[dict], dict]:
+    tr = Trace("ask", question=question, k=k, collection=col.name, embed_model=EMBED_MODEL, chat_model=CHAT_MODEL)
+    try:
+        with tr.span("embed_query"):
+            q = embed_query(question)
+
+        with tr.span("vector_search", k=k) as sp:
+            hits = search_by_vector(col, q, k=k)
+            sp["hits"] = [{"id": h["id"], "score": round(h["score"], 4)} for h in hits]
+
+        with tr.span("generate", model=CHAT_MODEL) as sp:
+            messages = [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": f"Context:\n\n{format_context(hits)}\n\nQuestion: {question}"},
+            ]
+            resp = chat_completion(messages)
+            answer = resp.choices[0].message.content
+            u = resp.usage
+            sp.update(input_tokens=u.prompt_tokens, output_tokens=u.completion_tokens,
+                      cost_usd=cost_usd(CHAT_MODEL, u.prompt_tokens, u.completion_tokens))
+
+        with tr.span("guardrails") as sp:
+            report = check_answer(answer, [h["text"] for h in hits])
+            sp.update(report)
+
+        tr.set(answer=answer, refused=report["refused"], guardrails_passed=report["passed"])
+        return answer, hits, report
+    finally:
+        tr.end()  # written even if a stage raised: failed requests are the ones you most need to see
 
 
 def main() -> None:
@@ -64,15 +90,28 @@ def main() -> None:
         raise SystemExit("Empty index: run phase1_naive_rag.03_index first")
 
     for q in [args.question] if args.question else DEMO:
-        answer, hits = ask(col, q, args.k)
+        answer, hits, report = ask(col, q, args.k)
         print(f"Q: {q}\n\n{answer}\n")
-        cited = {int(n) for n in re.findall(r"\[(\d+)\]", answer)}
         for n, h in enumerate(hits, 1):
             m = h["meta"]
-            mark = "*" if n in cited else " "
+            mark = "*" if n in report["cited"] else " "
             print(f" {mark}[{n}] {h['score']:.3f}  {m['ticker']} FY{m['fiscal_year']} {m['item']}  ({h['id']})")
             if args.show_context:
                 print("      " + h["text"][:300].replace("\n", " ") + "...")
+
+        # Policy = WARN: surface problems to the user instead of blocking (see guardrails.py docstring)
+        if report["refused"]:
+            print("\nguardrails: refusal (no answer in context)")
+        elif report["passed"]:
+            print("\nguardrails: ✅ citations valid, all numbers found in cited passages")
+        else:
+            if report["invalid_citations"]:
+                print(f"\nguardrails: ⚠ citations to passages that don't exist: {report['invalid_citations']}")
+            if report["uncited_answer"]:
+                print("\nguardrails: ⚠ answer makes claims without any citation")
+            if report["ungrounded_numbers"]:
+                print(f"\nguardrails: ⚠ numbers not found in cited passages (hallucinated or derived?): "
+                      f"{report['ungrounded_numbers']}")
         print(f"\n(* = cited, model={CHAT_MODEL})\n" + "=" * 80 + "\n")
 
 

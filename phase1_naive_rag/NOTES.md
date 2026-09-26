@@ -4,8 +4,11 @@
 00_download  EDGAR ──► data/raw/*.html (10 filings, 5 companies × 2 years) + manifest.json
 01_parse     HTML ──► clean text, split by SEC "Item" sections ──► data/processed/*.json
 02_chunk     sections ──► ~350-token chunks + metadata ──► data/processed/chunks_*.jsonl
-03_index     chunks ──► embed (bge-small, cached) ──► Chroma (HNSW, cosine) at data/chroma/
+03_index     chunks ──► embed (EMBED_MODEL from .env, cached) ──► Chroma (HNSW, cosine) at data/chroma/
 04_ask       question ──► embed query ──► top-k ──► prompt with numbered passages ──► answer with [n] citations
+             every answer ──► output guardrails (citations, numeric grounding); every question ──► trace in data/traces/
+05_guardrails_demo   test the guardrails on 10 labeled answers (catches and misses)
+06_traces            per-question timelines + p50/p95 latency, cost, refusal rate
 ```
 
 Run them in order:
@@ -16,6 +19,8 @@ uv run python -m phase1_naive_rag.02_chunk
 uv run python -m phase1_naive_rag.03_index
 uv run python -m phase1_naive_rag.04_ask                # demo questions
 uv run python -m phase1_naive_rag.04_ask "your question" -k 8 --show-context
+uv run python -m phase1_naive_rag.05_guardrails_demo  # no API calls
+uv run python -m phase1_naive_rag.06_traces           # no API calls
 ```
 
 "Naive" means one embedding query, top-k, stuff the results into the prompt, and generate. There is no query rewriting, keyword search, reranking or filtering. Every later phase fixes one of the failures listed in section 6.
@@ -139,6 +144,36 @@ Lessons:
 | Chunks lose context ("we", tables without headers) | Contextual retrieval, parent-child chunks | 5 |
 | "Does it actually work?" | Golden set, recall@k, faithfulness | 4 |
 
+## 7. Guardrails and observability (see `common/guardrails.py`, `common/trace.py`, `05`, `06`)
+
+These are added from Phase 1 on, not left until production, because **you can't improve what you can't see**. Every bug in this phase was found by looking at intermediate data, and traces make that automatic.
+
+**Output guardrails** (run on every answer, about 0.4 ms, no LLM call):
+- **Citation validator:** every `[n]` exists (1..k), and a non-refusal answer cites *something*.
+- **Numeric grounding:** every number in the answer appears in a cited passage. For financial Q&A, a hallucinated number is the costliest failure.
+- **Policy is *warn*, not block,** because the check's precision isn't high enough. `05_guardrails_demo.py` scores **6/10** on purpose:
+  - It catches hallucinated numbers, invalid and missing citations, and a number cited to the wrong passage.
+  - It **false-flags** correct arithmetic ("grew 6.4%") and unit conversions ("$416.2 billion").
+  - It **misses** real numbers attached to the wrong label or year.
+- String matching can't check meaning. That needs NLI or an LLM judge (Phase 4).
+- **A lesson from building it:** the first version flagged a correct "6%" answer, because it skipped single digits on *both* sides, and the table cell `| 6 |` was the evidence. Guardrails are code, and they need tests like any other code.
+
+**Observability** (`data/traces/*.jsonl`, one trace per question, spans per stage). Measured over 6 questions:
+
+| Stage | Mean latency | Share |
+|---|---|---|
+| embed_query | 393 ms (API; 0.5 ms on a cache hit) | 23% |
+| vector_search (HNSW) | 6 ms | 0.4% |
+| generate (gpt-4o-mini) | 1,320 ms | 77% |
+| guardrails | 0.4 ms | ~0% |
+
+p50 = 1.2 s, p95 = 3.2 s. About 1,790 input and 39 output tokens, so **$0.0003 per question ≈ $29 per 100k**. Refusal rate 33% (2 of the 4 demo questions are designed to fail).
+
+What this means:
+- **Optimize the LLM call first** (streaming, a smaller model, fewer or smaller chunks, caching), not the vector DB.
+- **Input tokens drive the cost** (k × chunk size).
+- **Watch the refusal rate and the top-1 retrieval score** over time, to detect drift after a re-index or a data change.
+
 ---
 
 ## Interview Q&A
@@ -170,10 +205,25 @@ Possible causes: a different embedding model or version (vectors aren't comparab
 **Q: Why parse into sections instead of chunking the raw text?**
 Chunks never mix unrelated sections, every chunk gets section metadata for free (for filters and citations), and we can drop boilerplate sections. It's cheap structure that makes both retrieval and debugging better.
 
+**Q: How do you prevent hallucinated numbers in a financial RAG assistant?**
+In layers. First, the prompt: answer only from context, cite, state units, refuse when the answer is missing. Second, a deterministic output check: every number in the answer must appear in a cited passage (normalized for `$`, commas and `%`). Third, for what string matching can't catch (derived numbers, wrong label or year), a semantic check such as an NLI or LLM-judge faithfulness check. For exact figures, go further and route the question to structured data (XBRL facts) instead of text retrieval. Test each guardrail with labeled cases: ours catches hallucinated numbers but false-flags derived percentages, so it warns rather than blocks.
+
+**Q: What are guardrails, and where do you put them in a RAG system?**
+Runtime checks that enforce policy independently of the prompt. **Input:** scope, prompt injection, PII, rate limits. **Retrieval:** access-control filters, treating retrieved text as untrusted, a relevance floor. **Output:** citation validity, groundedness, numeric checks, moderation, PII redaction. **Agent:** step, tool and budget limits. Cheap deterministic checks come first, semantic checks where they pay off. Choose block/repair/warn/log based on each check's measured precision.
+
+**Q: What do you log or trace in a RAG system, and why?**
+Per request: model, index and prompt versions; the query and any rewrites; the retrieved IDs and scores; tokens, cost and latency per stage; the output; the guardrail and eval results. That makes a bad answer attributable to a specific stage. Aggregate it into p50/p95 latency, cost per request, refusal rate and retrieval-score drift. Handle PII in traces (redaction, retention) and sample successes while keeping all errors.
+
+**Q: Your RAG endpoint's p95 latency is 3 seconds. Where do you look first?**
+At the per-stage spans. In our traces generation is 77% of the time and the vector search under 1%, so the order is: stream tokens (time-to-first-token is what users feel), shrink the prompt (fewer or smaller chunks), try a smaller or faster model, cache repeated queries and query embeddings, and only then look at retrieval. The p95/p50 gap here (3.2 s vs 1.2 s) comes from API and network variance, so also consider timeouts, retries and region.
+
 ## Experiments to try
 - [ ] Build and compare `--chunker fixed` vs `recursive`, and `--size 150` vs `800` (`02_chunk.py`, then `03_index.py` with the same flags, then `04_ask.py --chunker/--size`). Which demo questions change?
 - [ ] Ask the comparison question with `-k 15`. Does Amazon show up? What does that do to the prompt size?
 - [ ] Remove the BGE query prefix (`query_prefix` in `common/llm.py`) and compare the scores and ranks in `03_index.py`.
 - [ ] Switch to `EMBED_PROVIDER=openai`, rerun 02 → 04, and compare. (The 02 truncation check is skipped for OpenAI because its 8K limit is far above our chunk sizes.)
 - [ ] Ask "What was Microsoft's revenue?" with no year given. Which year does it pick, and does the answer say so?
-- [ ] Delete the "I don't know" rule from `SYSTEM` and ask the Google question again.
+- [ ] Delete the "I don't know" rule from `SYSTEM` and ask the Google question again. Do the guardrails catch what comes back?
+- [ ] Make one of the demo's false negatives pass as expected: e.g. require that an answer's number appears on a table row whose label shares a word with the sentence. How many new false positives does that cause?
+- [ ] Ask 10 of your own questions, then run `06_traces`. What's your p95? What share of the time is generation? What's the cost per 100k questions at `-k 10`?
+- [ ] Switch to `EMBED_PROVIDER=hf` and compare `embed_query` latency in the traces (local model vs API).

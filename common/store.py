@@ -33,7 +33,10 @@ def add_chunks(col, ids: list[str], texts: list[str], metadatas: list[dict], bat
 
 
 def search(col, query: str, k: int = 5, where: dict | None = None) -> list[dict]:
-    q = embed_query(query)
+    return search_by_vector(col, embed_query(query), k, where)
+
+
+def search_by_vector(col, q, k: int = 5, where: dict | None = None) -> list[dict]:
     res = col.query(query_embeddings=[q.tolist()], n_results=k, where=where)
     return [
         {"id": i, "text": d, "meta": m, "score": 1 - dist}  # chroma returns cosine DISTANCE

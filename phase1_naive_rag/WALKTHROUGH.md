@@ -17,11 +17,15 @@ Read this top to bottom and run each command as you reach it. The theory, the ex
  <T>_FY<Y>.html       <T>_FY<Y>.json       chunks_*.jsonl       data/chroma/
 
                          ONLINE (query): runs for every question
-┌──────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐
-│ question │──►│ embed_query  │──►│ Chroma top-k │──►│ build prompt │──►│ chat() → answer  │
-└──────────┘   │ (same model) │   │ (k=5, cosine)│   │ [1]..[k] +   │   │ with [n] cites + │
-               └──────────────┘   └──────────────┘   │ source header│   │ refusal path     │
-                                                     └──────────────┘   └──────────────────┘
+┌──────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐   ┌──────────────┐
+│ question │──►│ embed_query  │──►│ Chroma top-k │──►│ build prompt │──►│ generate         │──►│ guardrails   │──► answer
+└──────────┘   │ (same model) │   │ (k=5, cosine)│   │ [1]..[k] +   │   │ gpt-4o-mini,     │   │ citations +  │    + warnings
+               └──────────────┘   └──────────────┘   │ source header│   │ [n] cites +      │   │ numeric      │
+                                                     └──────────────┘   │ refusal path     │   │ grounding    │
+                                                                        └──────────────────┘   └──────────────┘
+               ├──── span ────┤   ├──── span ────┤                      ├────── span ──────┤   ├─── span ────┤
+               └──────────────────────── one Trace per question → data/traces/YYYY-MM-DD.jsonl ─────────────┘
+                                                                                     read by 06_traces (timeline + p50/p95, cost, refusal rate)
 ```
 
 **Design principle:** every step reads the previous step's files and writes its own. This gives you:
@@ -38,8 +42,10 @@ Read this top to bottom and run each command as you reach it. The theory, the ex
 | Parsing | `phase1_naive_rag/01_parse.py` | `html_to_text`, `split_sections` | BeautifulSoup + lxml, regex |
 | Chunking | `common/chunking.py` + `02_chunk.py` | `recursive_chunks`, `fixed_token_chunks`, `chunk_corpus` | tiktoken (`o200k_base`) |
 | Embedding | `common/llm.py` | `embed` (cached), `embed_query` (query prefix) | OpenAI API or sentence-transformers |
-| Vector store | `common/store.py` | `collection_name`, `get_collection`, `add_chunks`, `search` | Chroma (PersistentClient, HNSW) |
-| Generation | `common/llm.py` + `04_ask.py` | `chat`, `format_context`, `ask` | OpenAI chat (`gpt-4o-mini`, temp 0) |
+| Vector store | `common/store.py` | `collection_name`, `get_collection`, `add_chunks`, `search`, `search_by_vector` | Chroma (PersistentClient, HNSW) |
+| Generation | `common/llm.py` + `04_ask.py` | `chat_completion`, `chat`, `format_context`, `ask` | OpenAI chat (`gpt-4o-mini`, temp 0) |
+| Guardrails | `common/guardrails.py` + `05_guardrails_demo.py` | `check_answer`, `check_citations`, `check_numeric_grounding` | Plain Python + regex (no LLM call) |
+| Observability | `common/trace.py` + `06_traces.py` | `Trace`, `span()`, `cost_usd`, `load_traces` | JSONL traces, NumPy percentiles |
 
 ### Data model: how a record changes shape through the pipeline
 
@@ -509,7 +515,9 @@ uv run python -m phase1_naive_rag.04_ask                                  # 4 de
 uv run python -m phase1_naive_rag.04_ask "What was Amazon's AWS operating income in 2025?"
 uv run python -m phase1_naive_rag.04_ask -k 10 --show-context "..."       # more hits, show chunk text
 ```
-`--chunker/--size` must match an index you've built. If the collection is empty, the script stops with a clear message (`:63`).
+`--chunker/--size` must match an index you've built. If the collection is empty, the script stops with a clear message (`:89`).
+
+`ask()` (`04_ask.py:48`) runs the stages below. Each is wrapped in a **trace span** (`with tr.span(...)`), which Step 6 explains.
 
 ### 4a. Embed the query: `embed_query()` (`llm.py:89`)
 
@@ -522,7 +530,7 @@ embed([...])[0] → (1536,) vector, SAME model as the index
 - **Asymmetric models** (BGE, E5) embed questions and passages differently; the instruction goes on the **query side only**. Forgetting it lowers quality without any error.
 - **Same model as the index:** a query embedded with another model is in a different vector space, and the search returns nonsense.
 
-### 4b. Retrieve: `search()` (`store.py:35`)
+### 4b. Retrieve: `search_by_vector()` (`store.py:39`)
 
 ```
 col.query(query_embeddings=[q], n_results=k, where=None)     # HNSW approximate k-NN
@@ -532,10 +540,12 @@ score = 1 − distance      (Chroma returns cosine DISTANCE)
 ```
 `where=` supports metadata filters (e.g. `{"ticker": "AMZN"}`). It isn't used in naive RAG; it's the first fix in Phase 2.
 
-### 4c. Build the prompt: `format_context()` (`04_ask.py:36`) and `ask()` (`:44`)
+`search(col, query)` (`store.py:35`) is just `embed_query` + `search_by_vector` in one call. `ask()` calls the two separately so each gets its own span. That's how the traces show that embedding the query (an API call) costs about 60× more time than the HNSW search itself.
+
+### 4c. Build the prompt: `format_context()` (`04_ask.py:40`)
 
 ```
-system: SYSTEM (04_ask.py:17)
+system: SYSTEM (04_ask.py:21)
 user:   Context:
 
         [1] AAPL 10-K FY2025, Item 8: Financial Statements and Supplementary Data
@@ -556,9 +566,9 @@ The `SYSTEM` rules:
 4. State units (tables are in millions).
 5. Be concise.
 
-### 4d. Generate: `chat()` (`llm.py:93`)
+### 4d. Generate: `chat_completion()` (`llm.py:93`)
 
-gpt-4o-mini at **temperature 0**, so the same input gives a repeatable answer. That matters for debugging and evaluation.
+gpt-4o-mini at **temperature 0**, so the same input gives a repeatable answer. That matters for debugging and evaluation. `ask()` uses `chat_completion()`, which returns the **full** response, instead of `chat()` (`llm.py:98`, text only), because the response's `usage` field (`prompt_tokens`, `completion_tokens`) is what the trace uses to compute cost.
 
 **Cost per question:** about 1,700 prompt tokens with k=5 and 350-token chunks. It grows roughly as k × chunk size.
 
@@ -587,14 +597,14 @@ gpt-4o-mini at **temperature 0**, so the same input gives a repeatable answer. T
 **Limits of prompt-only grounding:**
 - Citations are **claims, not proof**. The model can cite [3] for something [3] doesn't say.
 - Refusal is **probabilistic**. A weaker model or a tempting partial match can still produce a confident wrong answer.
-- Both are measured in Phase 4 (faithfulness, answer relevance) and hardened in Phase 6 (self-checking agents) and Phase 7 (guardrails).
+- **Step 5 adds the first code-level check**: output guardrails that verify citations and numbers. Phase 4 measures faithfulness properly, and Phases 6–7 harden it further.
 
-### 4e. Report (`04_ask.py:66-76`)
+### 4e. Report (`04_ask.py:93-116`)
 
 ```
 answer text
-cited = {n for each "[n]" in answer}                      (regex, :69)
-for each hit: " *[n] score  TICKER FY item  (chunk_id)"   * = cited
+for each hit: " *[n] score  TICKER FY item  (chunk_id)"   * = cited (from the guardrail report's "cited" list)
+guardrails: ✅ passed | refusal | ⚠ invalid citations / no citations / ungrounded numbers
 ```
 Comparing **retrieved against cited** is your first debugging tool. If the right chunk was retrieved but not cited, look at generation. If it wasn't retrieved at all, look at retrieval.
 
@@ -609,6 +619,217 @@ Comparing **retrieved against cited** is your first debugging tool. If the right
 
 ---
 
+## Step 5: Output guardrails (`common/guardrails.py` + `05_guardrails_demo.py`)
+
+**Goal:** check every generated answer *before* the user sees it, cheaply and deterministically.
+
+```bash
+uv run python -m phase1_naive_rag.05_guardrails_demo      # 10 hand-written cases, no API calls
+```
+In `04_ask.py` the checks run on every answer inside the `guardrails` span (`:69-71`), and the result is printed under each answer.
+
+### 5a. The checks: `check_answer(answer, passages)` (`guardrails.py:61`)
+
+```
+report.refused            = is_refusal(answer)                      "I don't know based on the provided filings"
+report.cited              = sorted {n for "[n]" in answer}
+report.invalid_citations  = [n for n in cited if n ∉ 1..k]         citing [7] when only 5 passages existed
+report.uncited_answer     = no citations AND not a refusal          claims with no evidence
+report.ungrounded_numbers = numbers(answer) − numbers(cited passages)
+report.passed             = none of the three problems above
+```
+
+**`check_citations()`** (`:45`) catches two failures:
+- **Invalid indices:** the model cites a passage that doesn't exist.
+- **Uncited answers:** the model ignored the "cite every claim" rule.
+
+**`check_numeric_grounding()`** (`:54`) is the finance-specific check. A hallucinated revenue figure is the most damaging error a filings assistant can make. It works in three steps:
+1. **`extract_numbers()`** (`:31`) finds numbers with `NUM_RE` (`:16`). The pattern allows `$`, thousands commas, decimals and `%`, and skips numbers glued to letters or hyphens (`FY2025`, `10-K`, `E-4471`).
+2. **`_norm()`** (`:23`) puts them in a comparable form: `$416,161` → `416161`, `6.40%` → `6.4`.
+3. **Compare** the answer's numbers with the **cited** passages' numbers. If the answer cited nothing, it compares with all retrieved passages.
+
+**One asymmetry matters:** on the *answer* side, years (`2025`) and bare single digits are skipped as noise. On the *passage* side **every** number is kept.
+- **Why it matters:** the table cell `| 6 |` is the evidence for an answer's "grew 6%" (the parser dropped the separate `%` cell).
+- **The bug that taught this:** the first version skipped single digits on both sides, and flagged a correct "6%" answer as ungrounded. The trace kept a record of it.
+
+**Policy: warn, don't block.** `04_ask` prints `⚠` warnings and still shows the answer. Blocking needs high **precision**, and 5b shows this check doesn't have it.
+
+### 5b. Testing the guardrail itself: `05_guardrails_demo.py`
+
+A guardrail is a **classifier** ("is this answer safe to show?"), so it has false positives and false negatives like any other. The demo runs 10 hand-written answers against Apple's real FY2025 net-sales passage:
+
+| Case | Expected | Got | |
+|---|---|---|---|
+| Grounded answer `$416,161 million [1]` | pass | pass | ✅ |
+| Hallucinated `$420,500 million [1]` | flag | flag `['420500']` | ✅ |
+| Cites `[7]` with 2 passages | flag | flag | ✅ |
+| No citations | flag | flag | ✅ |
+| Right number, **wrong passage** cited `[2]` | flag | flag `['416161']` | ✅ |
+| Refusal | pass | pass | ✅ |
+| Correctly **derived** "grew 6.4%" | pass | **flag** | ❌ false positive |
+| **Unit conversion** "$416.2 billion" | pass | **flag** | ❌ false positive |
+| Real number, **wrong label** ("China ... $416,161M") | flag | **pass** | ❌ false negative |
+| Real number, **wrong year** ($391,035M is FY2024) | flag | **pass** | ❌ false negative |
+
+**Result: 6/10.** The four misses show exactly what string matching can't do: verify **arithmetic**, **unit conversions**, or whether a number is attached to the **right label and year**. That needs a *semantic* check, such as an LLM-as-judge or an NLI faithfulness model (Phase 4), at the cost of an extra model call per answer.
+
+### 📘 Deep dive: guardrails
+
+**What they are.** Guardrails are checks around an LLM system that enforce policy at runtime, independently of the model's instructions. Prompt rules ("cite everything") are *requests*; guardrails are *enforcement*.
+
+**Where they sit** (the interview framework):
+
+| Stage | Examples | In this project |
+|---|---|---|
+| **Input** | Scope/topic classifier, prompt-injection detection, PII detection, rate limits, auth | Phase 3 (scope, "investment advice" detection), Phase 7 (PII, rate limits) |
+| **Retrieval** | Per-user access filters (metadata `where=`), treating retrieved text as untrusted, a relevance floor | Phase 2 (relevance floor), Phase 5 (indirect prompt injection) |
+| **Output** | Citation validity, groundedness/faithfulness, numeric verification, moderation, PII redaction, format validation | **Phase 1: citations + numeric grounding.** Phase 4: faithfulness judge. Phase 7: moderation, PII |
+| **Agent/tool** | Max steps, tool allowlist, budget, loop detection, human approval for side effects | Phase 6 |
+
+**Kinds of checks, cheapest first:**
+1. **Rules and regex** (ours): microseconds, deterministic and explainable, but shallow. Our check runs in about 0.4 ms (from the traces).
+2. **Small classifiers:** moderation endpoints, prompt-injection classifiers, NLI models for entailment. Milliseconds, and they need calibration.
+3. **LLM-as-judge:** a second model call ("is every claim supported by the passages?"). The most semantic option, but it adds latency and cost, and it can be wrong too.
+
+**Actions a failed check can take:**
+- **Block:** refuse or return a fallback.
+- **Repair:** regenerate with feedback, or strip the unsupported sentence.
+- **Warn:** show the answer with a flag (ours).
+- **Log only:** a shadow mode, used to measure a new guardrail before enforcing it.
+
+Choose the action by the check's **precision**. Blocking with a noisy check destroys good answers, and users learn to ignore constant warnings.
+
+**Frameworks** (Phase 7):
+- **NeMo Guardrails:** dialogue rails written in the Colang language.
+- **Guardrails AI:** validators on structured outputs.
+- **Llama Guard:** a safety classifier model.
+- **Moderation endpoints:** e.g. OpenAI's.
+
+They package these patterns. The logic you write for your domain, like numeric grounding for financial filings, is usually what matters most.
+
+**Interview angle:** *"Guardrails at input, retrieval and output. Cheap deterministic checks first, semantic checks where it pays off. Every guardrail is itself a classifier with false positives and false negatives, so I test it with labeled cases and roll it out in log-only mode before it blocks anything."*
+
+---
+
+## Step 6: Observability, traces and metrics (`common/trace.py` + `06_traces.py`)
+
+**Goal:** for any question, be able to see exactly what happened: which chunks, what scores, how long each stage took, how many tokens, what it cost, and whether the guardrails passed. And from all questions together: how the system is doing overall.
+
+```bash
+uv run python -m phase1_naive_rag.06_traces              # aggregate metrics + timelines of the last 5 questions
+uv run python -m phase1_naive_rag.06_traces --last 1     # timeline of the most recent question
+uv run python -m phase1_naive_rag.06_traces --json 1     # the raw trace record
+```
+
+### 6a. The tracer: `common/trace.py`
+
+```python
+tr = Trace("ask", question=..., k=5, collection=..., embed_model=..., chat_model=...)   # trace.py:33
+with tr.span("vector_search", k=5) as sp:        # trace.py:43: times the block
+    hits = search_by_vector(...)
+    sp["hits"] = [{"id": ..., "score": ...}]     # record results INTO the span
+tr.set(answer=..., refused=..., guardrails_passed=...)
+tr.end()                                         # trace.py:59: appends one JSON line to data/traces/YYYY-MM-DD.jsonl
+```
+- **`span()`** is a context manager. It records `start_ms` (relative to the trace start) and `duration_ms`, and yields the span's `attrs` dict so the caller can attach data.
+- **Exceptions:** if the block raises, the span records `error` and re-raises.
+- **`ask()` calls `tr.end()` in a `finally`** (`04_ask.py:76`), so **failed requests are traced too**. Those are the ones you most need to see.
+- **`cost_usd()`** (`trace.py:26`) turns token counts into dollars using `PRICES` (`:20`), a hand-maintained table of list prices. Unknown or local models return `None`.
+- **`load_traces()`** (`:77`) reads all the JSONL files back.
+
+One trace record (real, from your run):
+```json
+{"trace_id": "1ebc18cb9b60", "name": "ask", "started_at": "2026-09-26T17:22:08.552+00:00", "duration_ms": 1167.5,
+ "attrs": {"question": "By what percentage did Apple's total net sales grow in fiscal 2025?", "k": 5,
+           "collection": "10k_text-embedding-3-small_recursive350", "embed_model": "text-embedding-3-small",
+           "chat_model": "gpt-4o-mini", "answer": "Apple's total net sales grew by 6% ... [3].",
+           "refused": false, "guardrails_passed": true},
+ "spans": [{"name": "embed_query",   "start_ms": 0.0,  "duration_ms": 0.5,    "attrs": {}},
+           {"name": "vector_search", "start_ms": 0.6,  "duration_ms": 3.5,    "attrs": {"k": 5, "hits": [{"id": "AAPL_FY2025_Item8_049", "score": 0.6714}, ...]}},
+           {"name": "generate",      "start_ms": 4.0,  "duration_ms": 1163.0, "attrs": {"model": "gpt-4o-mini", "input_tokens": 1786, "output_tokens": 38, "cost_usd": 0.00029}},
+           {"name": "guardrails",    "start_ms": 1167.0, "duration_ms": 0.4,  "attrs": {"refused": false, "cited": [3], "invalid_citations": [], "uncited_answer": false, "ungrounded_numbers": [], "passed": true}}]}
+```
+
+### 6b. The viewer: `06_traces.py`
+
+**`summary()`** (`:37`) aggregates metrics across all traces. Real output after 6 questions:
+```
+== 6 requests ==
+latency   p50=1247 ms  p95=3226 ms  max=3526 ms
+  embed_query    mean=  392.9 ms   share of total=22.9%
+  vector_search  mean=    6.4 ms   share of total= 0.4%
+  generate       mean= 1319.6 ms   share of total=76.7%
+  guardrails     mean=    0.4 ms   share of total= 0.0%
+tokens    mean in=1791  mean out=39
+cost      total=$0.0018  per request=$0.00029  -> $29 per 100k requests
+quality   refusal rate=33%  guardrail warnings=17%  top-1 retrieval score mean=0.654
+```
+
+**`timeline()`** (`:18`) shows one request as a waterfall. This is the same question asked twice:
+```
+total=3526 ms  [guardrails ⚠]                       ← first run (before the guardrail fix)
+  embed_query     2352.5 ms  █████████████████████████████████      ← API call (cache miss)
+  vector_search      9.5 ms                                   █
+  generate        1163.3 ms                                   ████████████████
+  guardrails         0.3 ms                                                   █
+                 ungrounded: ['6']                                 ← the false positive, preserved in history
+
+total=1168 ms  [guardrails ✅]                       ← second run
+  embed_query        0.5 ms  █                                     ← same question → embedding cache hit
+  vector_search      3.5 ms  █
+  generate        1163.0 ms  █████████████████████████████████████████████████
+```
+
+**What the data tells you:**
+- **Generation is 77% of the latency, and vector search is under 1%.** If you need speed, look at the LLM first: streaming (Phase 7), a smaller model, fewer or smaller chunks, response caching. Don't start by tuning HNSW.
+- **Query embedding costs a network round-trip on a cache miss** (400 ms on average, with a 2.3 s outlier). A local embedder or a query-embedding cache removes it. The cache hit took 0.5 ms.
+- **p95 is about 2.6× p50.** The tail comes from the network and the API, not from our code. p95/p99 is what users feel, so always report percentiles, not just averages.
+- **Cost: about $0.0003 per question**, which is about $29 per 100k questions. Input tokens dominate (1,791 in vs 39 out), so k × chunk size drives cost.
+- **The refusal rate and top-1 score** are quality signals you can watch over time. A rising refusal rate or a falling top-1 score after a re-index is an early warning (**drift**).
+
+### 📘 Deep dive: observability for LLM/RAG systems
+
+**The three signals** (from general software observability):
+
+| Signal | What | Here |
+|---|---|---|
+| **Traces** | The path of one request through the system, as a tree of timed **spans** | `data/traces/*.jsonl`, one record per question |
+| **Metrics** | Numbers aggregated over time: latency percentiles, rates, costs | `06_traces.py summary()` |
+| **Logs** | Discrete events and messages | Our span attributes play this role |
+
+**Why LLM apps need more than normal web tracing.** A request can be "successful" (HTTP 200, fast) and still **wrong**. So an LLM trace also records the *content*:
+- the prompt and inputs,
+- the retrieved chunk IDs and scores,
+- the output, token counts and cost,
+- the model and index versions,
+- the guardrail and eval results.
+
+That's what makes failures **attributable**: in the trace you can see whether retrieval missed the chunk or generation misused it (the debugging order below).
+
+**Data model:** trace → spans → attributes. It's the same in **OpenTelemetry** (the vendor-neutral standard; spans have a `trace_id`, a `span_id`, a `parent_span_id` and attributes) and in LLM platforms:
+- **Langfuse:** open source and self-hostable.
+- **LangSmith:** LangChain's platform, native to LangGraph.
+- **Arize Phoenix:** open source, built on OpenTelemetry.
+
+Our spans are flat, because the pipeline is a straight line. Agents (Phase 6) produce **nested** spans (agent step → tool call → retrieval → LLM), which is where a real platform pays off.
+
+**What to record (the RAG checklist):**
+- **Versions:** embed model, chat model, collection/index name, prompt version.
+- **Retrieval:** query (and rewritten queries), top-k IDs and scores, filters used.
+- **Generation:** input/output tokens, cost, latency, temperature.
+- **Quality:** refusal, guardrail results, and later eval scores and user feedback (👍/👎).
+
+**Production concerns** (Phase 7):
+- **PII:** traces contain user questions and answers, so apply redaction, retention limits and access control.
+- **Sampling:** keep 100% of errors, sample successes.
+- **Cost of tracing itself:** export asynchronously so it doesn't add latency.
+- **Online evaluation:** run an LLM judge on a sample of traced requests.
+- **Dashboards and alerts:** p95 latency, cost per request, refusal rate, retrieval-score drift.
+
+**Interview angle:** *"I trace every stage with the model and index versions, the retrieved IDs and scores, tokens, cost and guardrail results. With that, a bad answer can be attributed to parsing, retrieval, ranking or generation. On top of the traces I track p50/p95 latency, cost per request, refusal rate and score drift, and sample traces for online evaluation."*
+
+---
+
 ## What to rerun after a change
 
 | You changed... | Rerun |
@@ -617,10 +838,13 @@ Comparing **retrieved against cited** is your first debugging tool. If the right
 | Parser rules (`01_parse.py`) | 01 → 02 → 03 (the cache re-embeds only changed chunks) |
 | Chunk strategy, size or overlap | 02 `--chunker X --size N` → 03 with the same flags → 04 with the same flags |
 | Embedding model or provider (`.env`) | 03 (a new collection is created automatically) → 04 |
-| Prompt, `k` or chat model | 04 only |
+| Prompt, `k` or chat model | 04 only (compare before and after in `06_traces`) |
+| Guardrail rules (`common/guardrails.py`) | 05 (all verdicts should still be as expected) → 04 |
+| Nothing: you just want to inspect | `06_traces` (reads existing traces, no API calls) |
 
 ## Debugging order when an answer is wrong
 
+0. **Open the trace** (`06_traces --last 1`): retrieved IDs and scores, tokens, and guardrail results. It usually tells you which of the steps below to check.
 1. **Was the fact extracted?** Search `data/processed/<file>.json`. If it's missing, it's a **parse** problem.
 2. **Is it in one clean chunk?** Search `chunks_*.jsonl`. If it's split or mixed with another topic, it's a **chunking** problem.
 3. **Was it retrieved?** Use `--show-context -k 20`. If it's retrieved but ranked low, it's a **ranking** problem (Phases 2–3).
@@ -662,6 +886,13 @@ Check retrieval before generation. This is the standard answer to "your RAG give
 | **Grounding** | Making the LLM answer from supplied context rather than its training data |
 | **Refusal path** | An explicit instruction and behaviour for "the answer isn't in the context" |
 | **Temperature** | Sampling randomness. 0 means repeatable output |
+| **Guardrail** | Runtime check enforcing a policy on inputs, retrieval or outputs, independent of the prompt |
+| **Groundedness / faithfulness** | Every claim in the answer is supported by the provided context |
+| **False positive / negative (guardrail)** | Flags a good answer / misses a bad one |
+| **Trace / span** | One request's record / one timed stage inside it, with attributes |
+| **p50 / p95** | Median / 95th-percentile latency (what most users see vs the slow tail) |
+| **Drift** | Metrics (refusal rate, retrieval scores) shifting over time, e.g. after a re-index |
+| **OpenTelemetry** | Vendor-neutral standard for traces, metrics and logs |
 
 ## Self-check before moving on
 - [ ] Explain why the Apple footer made a 2023 table rank above the correct 2025 table.
@@ -670,3 +901,7 @@ Check retrieval before generation. This is the standard answer to "your RAG give
 - [ ] Why do the MSFT vs AMZN results fail the same way with both embedding models?
 - [ ] Walk through the four-step debugging order for "the answer is wrong".
 - [ ] `fiscal_year` metadata is the *filing* year. Why wouldn't filtering to FY2025 exclude the 2023 table?
+- [ ] Why is the numeric guardrail "warn" and not "block"? Use the 6/10 result.
+- [ ] Why must the passage side keep single-digit numbers when the answer side skips them?
+- [ ] From the traces, where would you optimize first to cut p95 latency, and why not the vector search?
+- [ ] What would you add to a trace so you can tell, a month later, which index and prompt version produced an answer?

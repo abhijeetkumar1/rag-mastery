@@ -90,8 +90,10 @@ def embed_query(query: str, model: str = EMBED_MODEL, provider: str = EMBED_PROV
     return embed([query_prefix(model) + query], model=model, provider=provider)[0]
 
 
+def chat_completion(messages: list[dict], model: str = CHAT_MODEL, temperature: float = 0.0, **kw):
+    """Full API response: use when you need token usage (tracing, cost)."""
+    return client().chat.completions.create(model=model, messages=messages, temperature=temperature, **kw)
+
+
 def chat(messages: list[dict], model: str = CHAT_MODEL, temperature: float = 0.0, **kw) -> str:
-    resp = client().chat.completions.create(
-        model=model, messages=messages, temperature=temperature, **kw
-    )
-    return resp.choices[0].message.content
+    return chat_completion(messages, model, temperature, **kw).choices[0].message.content
