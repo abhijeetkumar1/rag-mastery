@@ -32,7 +32,8 @@ Every phase folder contains runnable scripts plus:
 
 ## Structure
 ```
-common/        config (.env), embed/chat wrappers with cache, chunkers, Chroma store, tracer, guardrails
+common/        config (.env), embed/chat wrappers with cache, chunkers, Chroma store, tracer, guardrails,
+               BM25, fusion (RRF), filters, reranker, hybrid Retriever
 phase0_*/      one folder per phase: numbered scripts + NOTES.md
 data/          raw/ filings, processed/ text + chunks, chroma/ index, traces/ request traces (all git-ignored)
 ```

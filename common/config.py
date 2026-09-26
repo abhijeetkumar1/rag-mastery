@@ -16,6 +16,9 @@ HF_EMBED_MODEL = os.getenv("HF_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 # Optional: only needed for gated/private models or higher Hub rate limits. Empty -> anonymous.
 HF_TOKEN = os.getenv("HF_TOKEN") or None
 EMBED_MODEL = HF_EMBED_MODEL if EMBED_PROVIDER == "hf" else OPENAI_EMBED_MODEL
+
+# Cross-encoder reranker (local sentence-transformers model), Phase 2+
+RERANK_MODEL = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 
 # SEC EDGAR requires "Name email" in the User-Agent of every request
