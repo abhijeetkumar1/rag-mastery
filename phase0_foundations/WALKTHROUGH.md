@@ -61,6 +61,49 @@ Why it's built this way:
 
 ---
 
+### 📘 Deep dive: what an embedding model is and how it's trained
+
+An **embedding** is a fixed-length list of numbers (a vector) that represents a text's meaning. Similar meanings → nearby vectors.
+
+**Architecture:** a Transformer **encoder** (BERT-style) reads the tokens and produces one vector per token. **Pooling** turns them into one vector per text:
+- **CLS pooling** takes the output of a special first token (BGE).
+- **Mean pooling** averages all the token vectors (MiniLM).
+
+The vector is then usually **L2-normalized** to length 1.
+
+**Training (contrastive learning):**
+```
+batch of pairs:  (q1, p1)  (q2, p2)  (q3, p3) ...      q = query/sentence, p = its matching passage
+loss (InfoNCE):  make cos(q1, p1) high, and cos(q1, p2), cos(q1, p3), ... low   ← in-batch negatives
+```
+- **Training data:** millions of pairs (search queries with clicked results, question/answer pairs, title/body, paraphrases).
+- **Hard negatives:** passages that look similar but are wrong. They teach fine distinctions.
+- **What this explains** about the failure modes in Step 2:
+  - Models learn **topic** extremely well, because most training pairs share a topic.
+  - They learn **negation, numbers and exact IDs** poorly, because few training pairs hinge on them.
+
+**Bi-encoder vs cross-encoder:**
+- An embedding model is a **bi-encoder**: query and document are encoded *separately*, so documents can be embedded once, ahead of time.
+- A **cross-encoder** reads the query and document *together* and outputs a relevance score. It's more accurate, but nothing can be precomputed, so it's used only to rerank a shortlist (Phase 2).
+
+### 📘 Deep dive: the two embedding backends
+
+**OpenAI Embeddings API**:
+- **Call:** `client.embeddings.create(model="text-embedding-3-small", input=[...up to 2048 texts...])`. It returns `data[i].embedding`, a list of 1536 floats, already normalized.
+- **Limits:** max 8,191 tokens per input; price $0.02 per 1M tokens.
+- **`dimensions=`:** asks the server for a shorter vector (Matryoshka, Step 2).
+- **Batching:** one call carries many texts, which is why `embed()` sends batches of 256.
+
+**sentence-transformers (local)**:
+- **Setup:** `SentenceTransformer("BAAI/bge-small-en-v1.5")` downloads the weights (about 130 MB) from the Hugging Face Hub to `~/.cache/huggingface`, then runs on CPU or Apple's MPS GPU.
+- **`encode(texts, normalize_embeddings=True)`:** tokenize, then Transformer forward pass, then pooling, then normalization.
+- **Trade-off:** free and private, but slower on a laptop. bge-small has 33M parameters, 384 dimensions and a 512-token limit.
+
+**The cache** (`.cache/embeddings/<sha256>.json`):
+- **SHA-256** turns `model::text` into a fixed 64-character hex key: the same input always gives the same key, and different inputs practically never collide.
+- **Why it's safe:** an embedding is a pure function of (model, text), so a cached vector is always valid. Switching models changes the key.
+- **Production version:** the same idea, stored in Redis, a KV store, or alongside the chunk record.
+
 ## Step 1: Similarity metrics (`01_similarity.py`)
 
 ```bash
@@ -78,6 +121,14 @@ a vs b (same dir)    dot= 28.000  cos= 1.000  euclid= 3.742
 a vs c (diff dir)    dot=  2.500  cos= 0.209  euclid= 4.387
 ```
 **Read it:** a and b point the same way, so cosine is exactly 1.0. Dot and Euclidean are both affected by b being twice as long. **Cosine measures only direction; dot and L2 also depend on length.**
+
+### 📘 Deep dive: NumPy vectorization
+
+- **NumPy stores arrays as contiguous typed memory** (float32 = 4 bytes per number), so a (N, d) matrix is one block of N·d·4 bytes.
+- **`a @ b` / `np.dot`** hand the work to **BLAS**, a highly optimized linear-algebra library (Apple Accelerate on macOS, OpenBLAS elsewhere). It uses SIMD instructions and multiple cores.
+- **The payoff:** `matrix @ q` over 10,000 × 1536 floats takes a few milliseconds. A Python loop over the same numbers would take seconds.
+- **`np.linalg.norm(v)`** = √(Σvᵢ²), the L2 length. `v / norm(v)` gives it length 1.
+- **Why float32:** embeddings don't need float64 precision, and float32 halves memory and bandwidth. Vector DBs go further with float16, int8 or binary quantization (Phase 7).
 
 ### Part B: after L2-normalizing (`:36-41`)
 
@@ -100,6 +151,15 @@ dim= 1536  mean cos=-0.000  std=0.026
 **Read it:** as d grows, random vectors become almost exactly perpendicular (cos ≈ 0), with a spread of about 1/√d. In 1536 dimensions, *unrelated* texts cluster tightly around a base level, and *related* texts are only somewhat higher. **Scores sit in a narrow band, so fixed thresholds break easily. Rank with top-k instead.** Phase 1 confirmed this with real numbers: real hits scored 0.65–0.75, and an off-corpus question scored 0.50.
 
 ---
+
+### 📘 Deep dive: why random vectors become orthogonal (concentration of measure)
+
+The cosine of two random unit vectors is an average of d small independent products. By the law of large numbers it concentrates around 0, with **standard deviation ≈ 1/√d**. Your output matches this exactly: d=10 → 0.316 (1/√10), d=100 → 0.100, d=1536 → 0.026 (1/√1536 = 0.0255).
+
+**What it means for RAG:**
+- **Real embeddings aren't random.** They share common directions (anisotropy), so even unrelated texts score around 0.1–0.5, depending on the model.
+- **The usable range is narrow.** Unrelated texts cluster in a tight band, related texts sit only somewhat above it, and **each model has its own band**. In Phase 1, bge-small put real hits at 0.72–0.83, while OpenAI put them at 0.65–0.75.
+- **So:** rank by top-k, and calibrate any threshold per model on labeled data.
 
 ## Step 2: Real embeddings and their failure modes (`02_embeddings.py`)
 
@@ -144,6 +204,15 @@ dim=  64  paraphrase=0.779  opposite=0.795  fruit-vs-company=0.227
 
 ---
 
+### 📘 Deep dive: Matryoshka representation learning (MRL)
+
+A normal embedding spreads information across all dimensions, so cutting it in half destroys it. **MRL** changes the training objective: the loss is computed on several **prefixes** of the vector at once (e.g. the first 64, 128, 256, 512 and 1536 dimensions), so the most important information is packed into the first dimensions. It's named after nested Russian dolls.
+
+- **Supported:** OpenAI text-embedding-3 (pass `dimensions=256`), nomic-embed-v1.5, and some newer open models.
+- **Not supported:** bge-small and MiniLM, so truncating them degrades faster.
+- **Why use it:** a 256-d index is **6× smaller** and faster to search. A common pattern is **"funnel search"**: shortlist with short vectors, then re-score with the full vectors.
+- **Rule:** always **re-normalize** after truncating, because the prefix of a unit vector isn't a unit vector.
+
 ## Step 3: A vector database in 30 lines (`03_tiny_vector_search.py`)
 
 ```bash
@@ -167,6 +236,13 @@ This is **exact k-nearest-neighbour search**. `argpartition` is a small but real
 
 **Note:** this script calls `embed([query])` directly. It doesn't use `embed_query()`, which was added in Phase 1 to put BGE's query prefix in front. With OpenAI that makes no difference; with bge-small the queries would score a bit lower. Phase 1 always uses `embed_query()`.
 
+### 📘 Deep dive: `argpartition` vs sort
+
+- `np.argsort(scores)` fully sorts N scores: O(N log N).
+- `np.argpartition(-scores, k)` uses **introselect** to put the k largest in the first k positions, *unordered*, in O(N).
+- Then only those k get sorted: O(k log k).
+- For N = 1M and k = 5, that's about 1M operations instead of about 20M. Real vector DBs do the equivalent with a **bounded min-heap** of size k while scanning.
+
 ### Part A: semantic search works
 ```
 Q: Can I get my money back?          0.357  Our refund policy allows returns within 30 days...
@@ -188,6 +264,21 @@ N=300,000  memory=1.84 GB  search=6722.0 ms
 
 ---
 
+### 📘 Deep dive: why brute force is slow at scale
+
+**Bytes:** each query must read the **whole matrix**: N × d × 4 bytes. At 300k × 1536 that's 1.84 GB *per query*.
+
+**Memory bandwidth, not arithmetic, sets the speed:**
+- A laptop reads RAM at about 50–100 GB/s, which is about 20–40 ms per query at 1.84 GB.
+- Your 300k run took 6.7 s. The script creates the random data in float64 first (3.7 GB) and then converts it, so memory pressure and swapping are the likely cause.
+- At that scale you're limited by memory, not CPU.
+
+**Fixes, from simplest to most involved:**
+1. **Smaller vectors:** Matryoshka truncation, float16/int8 quantization.
+2. **Don't read everything:** ANN indexes (HNSW, IVF). See the HNSW deep dive in `phase1_naive_rag/WALKTHROUGH.md`.
+3. **Compress:** product quantization (PQ).
+4. **Spread the index:** sharding across machines.
+
 ## How Phase 0 feeds the later phases
 
 | Phase 0 finding | Where it comes back |
@@ -199,6 +290,22 @@ N=300,000  memory=1.84 GB  search=6722.0 ms
 | Paraphrase strength, query/doc mismatch | Query rewriting, HyDE (Phase 3) |
 | Brute force is O(N) | HNSW in Chroma (Phase 1). Index tuning and pgvector/Qdrant (Phase 7) |
 | Cache by model + text | Re-index after parser fixes took 5 s instead of 21 s (Phase 1) |
+
+## Glossary (quick reference)
+
+| Term | One-line meaning |
+|---|---|
+| **Embedding** | Fixed-length vector representing a text's meaning |
+| **Encoder / pooling** | Transformer that produces per-token vectors / combining them into one (CLS or mean) |
+| **Contrastive learning / InfoNCE** | Training that pulls matching pairs together and pushes others apart |
+| **Bi-encoder / cross-encoder** | Encode query and document separately (fast, indexable) / together (accurate, rerank only) |
+| **L2 norm / normalization** | Vector length √Σv² / scaling to length 1 |
+| **Dot / cosine / Euclidean** | Similarity metrics. Identical ranking on unit vectors |
+| **Curse of dimensionality** | Random high-dimensional vectors are nearly orthogonal; scores concentrate |
+| **Matryoshka (MRL)** | Training so vector prefixes are usable embeddings |
+| **Exact k-NN / ANN** | Brute-force nearest neighbours / approximate but sub-linear (HNSW, IVF, PQ) |
+| **BLAS** | Optimized linear-algebra library behind NumPy's `@` |
+| **argpartition** | O(N) selection of the top-k without a full sort |
 
 ## Self-check before moving on
 - [ ] Why does cosine give 1.0 for `a` and `2a` while Euclidean distance doesn't?

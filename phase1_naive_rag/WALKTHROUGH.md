@@ -99,6 +99,41 @@ write data/raw/manifest.json
 4. **Fiscal year** (`:62`) = the year the reporting period ends. That matches each company's own naming. NVIDIA's year ending January 2026 is its FY2026, and Microsoft's year ending June 2026 is FY2026.
 5. **Idempotent** (`:66`): an existing file is skipped. The manifest is always rewritten.
 
+### 📘 Deep dive: SEC EDGAR and the 10-K
+
+**EDGAR** is the SEC's public filing system. Every US-listed company files its reports there, free to download. Three identifiers matter:
+
+| Identifier | Example | Meaning |
+|---|---|---|
+| **CIK** (Central Index Key) | `320193` (Apple) | A permanent company ID. Tickers can change; the CIK doesn't. URLs use it padded to 10 digits: `CIK0000320193` |
+| **Accession number** | `0000320193-25-000079` | A unique ID for each filing: `<filer CIK>-<year>-<sequence>`. The folder URL uses it without dashes |
+| **Form type** | `10-K`, `10-K/A`, `10-Q`, `8-K` | Annual report, amended annual report, quarterly report, material event |
+
+The two JSON APIs we use:
+- `sec.gov/files/company_tickers.json`: ticker → CIK for every listed company.
+- `data.sec.gov/submissions/CIK##########.json`: a company's filing history. `filings.recent` holds about the last 1,000 filings as parallel lists.
+
+**Fair-access policy:** at most 10 requests per second, and a `User-Agent` with a name and email is mandatory. Clients that break either rule get blocked by IP.
+
+**What a 10-K contains.** Its structure is set by regulation, which is why splitting by Item works:
+
+| Item | Content | Typical size here | RAG relevance |
+|---|---|---|---|
+| 1 Business | What the company does, segments, competition | 13–54K chars | "What does X do?" |
+| **1A Risk Factors** | Every risk the company must disclose | **59–115K chars** (the biggest prose section) | Risk questions. Near-identical from year to year |
+| 1B / 1C | Unresolved SEC comments / cybersecurity | small | |
+| 2, 3, 4 | Properties, legal proceedings, mine safety | small | |
+| 5 | Stock market info, buybacks | small | |
+| 6 | [Reserved] (removed by the SEC in 2021) | empty, dropped | |
+| **7 MD&A** | Management's Discussion & Analysis: *why* the numbers moved | 15–55K chars | "Why did revenue grow?" Narrative plus tables |
+| 7A | Market risk (interest rates, FX) | small | |
+| **8 Financial Statements** | Income statement, balance sheet, cash flows, notes | 60–173K chars | Exact numbers. **NVDA puts these under Item 15** |
+| 9, 9A–9C | Accountant changes, internal controls | small | |
+| 10–14 | Directors, executive pay, ownership | **nearly empty** | Usually "incorporated by reference" to the separate proxy statement (DEF 14A), so the text isn't in the 10-K |
+| 15, 16 | Exhibits index, summary | varies | |
+
+**Interview angle:** knowing your documents' structure is the cheapest retrieval improvement there is. It gives you section-aware chunking, section metadata for filters, and the knowledge that exec-pay questions can't be answered from 10-Ks alone.
+
 **Output:** 10 HTML files plus `manifest.json`.
 
 **How to check it worked:** `grep -c "ANNUAL REPORT PURSUANT TO SECTION 13" data/raw/*.html` should give ≥ 1 for every file.
@@ -148,6 +183,28 @@ drop sections whose body ≤ 200 chars ("Item 6. [Reserved]")
 - **Joining cells** before matching handles Amazon, which writes real headings as 2-cell table rows (`Item 1. | Business`).
 - **The title rules** reject running headers (`Item 1` with no title) and cross-references inside sentences ("Item 7 of this report..." has a lowercase next word).
 
+### 📘 Deep dive: inline XBRL, BeautifulSoup and lxml
+
+**Inline XBRL (iXBRL).** Since 2019–2021 the SEC has required financial filings to be **machine-readable HTML**. It's a single XHTML file that browsers display normally but that also carries tagged data:
+```html
+<ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+                contextRef="c-1" unitRef="usd" decimals="-6" scale="6">416,161</ix:nonFraction>
+```
+- **Tagged numbers:** every number in the financial statements is wrapped like this (AAPL FY2025 has 969 `ix:nonFraction` tags), with a standard **us-gaap concept name**, a period (via `contextRef`), a unit and a scale (`6` = millions).
+- **`<ix:header>`:** a hidden block holding contexts, units and hidden facts. We delete it (its contents don't belong in retrieval).
+- **Why MSFT's files are about 4× bigger:** more tags, more `<span>`s and more inline styles. The text itself is similar in size.
+- **Worth knowing:** for exact numeric questions, the XBRL facts are **better than text retrieval**. They're structured, labeled and period-tagged. SEC even serves them as JSON (`data.sec.gov/api/xbrl/companyfacts/CIK##########.json`). A production financial assistant would route numeric questions to structured data and prose questions to RAG. That's the text-to-SQL / structured-retrieval idea in Phase 5 and Phase 6 routing.
+
+**BeautifulSoup + lxml.**
+- **lxml** is a fast C library that parses HTML or XML into a tree.
+- **BeautifulSoup** is a friendlier Python API on top: `find_all(tag)`, CSS `select()`, `get_text()`, and tree edits (`decompose()` removes a node, `replace_with()` swaps it, `insert_before/after` adds text).
+- The `XMLParsedAsHTMLWarning` we suppress happens because iXBRL is technically XHTML. Parsing it as HTML with lxml is fine for text extraction; it just loses the XML namespace precision, which we don't need.
+- **Why edit the tree before `get_text()`:** text extraction is lossy. Once everything is flat text, you can't tell a table cell from a paragraph or an inline span from a block. So all structure decisions (row → `a | b | c`, block → blank line) happen **on the tree**, and the flattening happens last.
+
+**Production alternatives:**
+- **Unstructured, Docling, LlamaParse, Azure Document Intelligence:** they handle PDFs, scans and tables, returning typed elements (Title, NarrativeText, Table).
+- **Hand-written parsers like ours:** they win when you know the format well, as with 10-Ks. Generic parsers win across many formats.
+
 **Output:** `data/processed/AAPL_FY2025.json` = `{ticker, fiscal_year, filing_date, period_end, url, sections:[{item, title, text}]}`
 
 **How to check it worked:** the script prints each file's sections.
@@ -176,6 +233,22 @@ uv run python -m phase1_naive_rag.02_chunk --chunker fixed --size 200 --overlap 
 ### 2a. Token counting (`chunking.py:10-14`)
 
 Sizes are counted in **tokens**, because every model limit is in tokens. tiktoken's `o200k_base` (the GPT-4o tokenizer) is the general-purpose counter.
+
+### 📘 Deep dive: tokens and tiktoken
+
+**What a token is.** LLMs and embedding models don't read characters or words. They read **tokens**: sub-word pieces from a fixed vocabulary, learned with **BPE** (Byte-Pair Encoding).
+- **How BPE builds its vocabulary:** start from bytes, then repeatedly merge the most frequent adjacent pair into a new token, until the vocabulary reaches its target size.
+- **Common words** end up as 1 token (` revenue`), and rare strings split into several (`E-4471` → `E`, `-`, `447`, `1`). That's one reason exact IDs embed poorly (Phase 0).
+- **Rule of thumb** for English: 1 token ≈ 4 characters ≈ 0.75 words. Tables with lots of numbers and `|` use more tokens per character.
+
+**tiktoken** is OpenAI's fast BPE tokenizer library, with a Rust core.
+- **`o200k_base`** (200k vocabulary) is the encoding for GPT-4o and gpt-4o-mini. `cl100k_base` is the older one (GPT-4, text-embedding-3).
+- Counting with `o200k_base` is a good estimate for **prompt cost**. It's *not* exactly what the embedder sees: text-embedding-3 uses `cl100k_base`, and bge uses a BERT WordPiece vocabulary of about 30k tokens. That's why `02_chunk.py` re-counts with **bge's own tokenizer** before trusting the 512 limit.
+
+**Why sizes are in tokens, not characters:**
+- **Model limits** (bge 512, OpenAI embeddings 8,191, the chat context window) are in tokens.
+- **Prices** are per token.
+- **Characters per token vary.** A 350-token chunk of prose is about 1,500 characters; a 350-token numeric table is less.
 
 ### 2b. Strategy A: `fixed_token_chunks()` (`chunking.py:17`)
 
@@ -280,6 +353,147 @@ return (2344, 1536) float32
 - After the parser fixes, re-indexing took **5–9 s instead of about 21 s**. Only chunks whose text changed missed the cache. This is hash(model + text) caching, the standard production pattern.
 - **Disk usage:** the cache is about 130 MB, because each vector is stored as a JSON text file. In production you'd store float32 binary (about 4× smaller) in a key-value store.
 
+### 📘 Deep dive: embedding models
+
+An embedding model is a neural network (a Transformer encoder) that maps text to a fixed-length vector. It's trained with **contrastive learning**:
+- **Positive pairs** (question ↔ answer passage, paraphrase ↔ paraphrase) are pulled together.
+- **In-batch negatives** (other passages in the same batch) are pushed apart.
+- **Pooling:** the per-token outputs are combined into one vector, either by taking the special `[CLS]` token's output (BGE) or by averaging all token outputs (mean pooling).
+
+| | `text-embedding-3-small` (current) | `BAAI/bge-small-en-v1.5` (local option) |
+|---|---|---|
+| Where it runs | OpenAI API | Your laptop (CPU/MPS) via sentence-transformers |
+| Dimensions | 1536 (can be reduced with `dimensions=`, Matryoshka) | 384 |
+| Max input | 8,191 tokens | 512 tokens (**silently truncates**) |
+| Query/doc symmetry | Symmetric (no prefix) | **Asymmetric:** query instruction prefix |
+| Normalized output | Yes | Yes, with `normalize_embeddings=True` |
+| Cost | $0.02 per 1M tokens (our corpus ≈ $0.013) | Free; about 38 s to embed the corpus on a laptop |
+| Data leaves your machine | Yes | No |
+| Scores on our data | real hits 0.65–0.75, off-corpus 0.50 | real hits 0.72–0.83, off-corpus 0.69 |
+
+**sentence-transformers** is the Hugging Face library that wraps a Transformer, its tokenizer and the pooling step into `model.encode(texts)`. It downloads models from the Hugging Face Hub into `~/.cache/huggingface` on first use.
+
+**How to choose (interview answer):** start from the retrieval tab of the **MTEB leaderboard**, then **evaluate on your own data** (Phase 4). Also weigh dimensions (storage and speed), max input tokens, language coverage, latency, price, and whether data may leave your network.
+
+### 📘 Deep dive: Chroma
+
+**What it is:** an open-source vector database. It can run embedded in your Python process (what we use), as a client/server, or as a hosted service. What it provides:
+1. **Storage** for records `{id, embedding, document, metadata}`.
+2. **ANN search** over the embeddings (HNSW, next deep dive).
+3. **Filtering:** `where=` on metadata (`{"ticker": "AMZN"}`, `{"fiscal_year": {"$gte": 2025}}`, `$and`/`$or`) and `where_document=` on text (`{"$contains": "iPhone"}`).
+
+**Our usage** (`common/store.py`):
+
+| Call | What it does |
+|---|---|
+| `chromadb.PersistentClient(path="data/chroma")` | Embedded mode, saved to disk. No server needed |
+| `get_or_create_collection(name, metadata={"hnsw:space": "cosine"})` | A **collection** is like a table: one embedding space, one index |
+| `col.add(ids, embeddings, documents, metadatas)` | Insert. We pass **our own** vectors |
+| `col.query(query_embeddings=[q], n_results=k, where=...)` | ANN search. Returns ids, documents, metadatas, **distances** |
+| `col.get(ids=[...])` | Fetch by ID (no similarity search) |
+| `client.delete_collection(name)` | Drop the collection (our `reset=True` path) |
+
+**What's on disk.** This is from inspecting your `data/chroma/`, chromadb 1.5.9:
+```
+data/chroma/
+├── chroma.sqlite3                          80 MB   system database (SQLite)
+│   ├── collections, segments               which collections exist and their config
+│   ├── embeddings + embedding_metadata     ids + metadata (4,710 records × 6 fields, both collections)
+│   ├── embedding_fulltext_search*          SQLite FTS5 full-text index over documents → powers where_document
+│   └── embeddings_queue                    write-ahead log: every add() lands here first (vectors as BLOBs)
+└── <segment-uuid>/                          one folder per collection's VECTOR segment (the HNSW index)
+    ├── header.bin                           index parameters
+    ├── data_level0.bin        12.5 MB       layer-0 graph: each node's vector + its neighbour list
+    ├── link_lists.bin                       neighbour lists for the upper layers
+    ├── length.bin
+    └── index_metadata.pickle                id ↔ internal label mapping
+```
+
+Each collection has **two segments**:
+- A **metadata segment** (SQLite): documents, metadata, full-text index.
+- A **vector segment** (HNSW files): the vectors and the graph.
+
+A query combines the two: filter via SQLite, then search the vectors via HNSW.
+
+**Chroma internals that matter:**
+- **Writes are batched.** Everything goes into `embeddings_queue` first, and is flushed into the HNSW files every `sync_threshold = 1000` records. Your `data_level0.bin` is exactly 2,000 × 6,284 bytes: **2,000 of the 2,344 vectors are in the persisted index. The last ~344 added (the TSLA FY2025 chunks, for example) are still in the queue.** (6,284 bytes = a 1,536-float vector of 6,144 bytes + 32 neighbour IDs + overhead.) Queries still see all 2,344, because Chroma replays the queue into memory on load. Verified: queued vectors come back as their own top-1. Real databases work the same way: write-ahead log first, index flush later.
+- **The default embedding function trap.** The collection config shows `embedding_function: default`. When you don't pass one, Chroma attaches its built-in model (all-MiniLM-L6-v2, 384-d). We always pass `embeddings=` and `query_embeddings=`, so it's never used. But if you called `col.query(query_texts=["..."])`, Chroma would embed the text with MiniLM (384-d) and search an index of 1536-d OpenAI vectors. That fails with a dimension error, or with the bge index (also 384-d) it **silently returns meaningless results**. Always query with vectors from the same model as the index.
+- **Orphan files.** `delete_collection` removed the collections from SQLite but left 2 old segment folders on disk (about 24 MB). Deleting all of `data/chroma/` and re-running `03_index` cleans them up.
+- **Scale:** embedded Chroma is ideal for prototypes and up to about a few million vectors on one machine. Beyond that, or for multi-tenant production, you'd look at pgvector (vectors inside Postgres, with SQL joins and transactions), Qdrant, Weaviate, Milvus, or a managed service (Phase 7).
+
+### 📘 Deep dive: HNSW (Hierarchical Navigable Small World)
+
+**The problem:** exact search compares the query with every vector, O(N). Phase 0 measured 142 ms at 100k vectors and 6.7 s at 300k. HNSW finds *almost* the same top-k while touching only a few hundred vectors, roughly O(log N).
+
+**Idea 1: a navigable proximity graph.** Link every vector to its nearest neighbours. To search, start somewhere and **greedily hop** to whichever neighbour is closer to the query, until no neighbour is closer. It's like navigating a city by always taking the street that heads toward your destination.
+
+**Idea 2: layers, like a skip list.** A single graph needs many short hops to cross the space, and greedy search can stall. So HNSW adds sparse "express" layers:
+
+```
+Layer 2:  A ─────────────────────── F                     ~9 nodes here     long jumps
+          │                          │
+Layer 1:  A ──────── C ──────────── F ──────── H           ~146 nodes        medium jumps
+          │          │               │          │
+Layer 0:  A ── B ── C ── D ── E ── F ── G ── H ── I ── J   all 2,344 nodes   local links
+```
+- Every vector lives in layer 0.
+- Each vector is promoted to the next layer up with probability about 1/M. With **M = 16**, about 1/16 of the nodes reach layer 1 and about 1/256 reach layer 2.
+- For your 2,344 vectors that gives roughly 3 layers: ~146 nodes in layer 1 and ~9 in layer 2.
+
+**Search:**
+1. Enter at the top layer's entry point and greedily hop toward the query.
+2. When no neighbour is closer, **drop one layer** and continue from the same node.
+3. At layer 0, run a *beam* search that keeps the best **`ef_search`** candidates, not just one.
+4. Return the best k of them.
+
+**Insert:**
+1. Draw a random top level for the new node.
+2. Search down to that level.
+3. At each layer, connect the node to up to M neighbours, chosen with a heuristic that prefers **diverse directions** over simply the closest. Diversity keeps the graph navigable. Layer 0 allows 2M links.
+
+**The knobs** (your collection's actual values):
+
+| Parameter | Chroma name | Yours | Effect of increasing |
+|---|---|---|---|
+| M | `max_neighbors` | 16 | Better recall, more memory, slower inserts |
+| ef_construction | `ef_construction` | 100 | Better graph quality, slower build |
+| ef_search | `ef_search` | 100 | **Better recall, slower queries.** This is the knob you tune at query time |
+
+With `ef_search = 100` over only 2,344 vectors, each search looks at a large share of the collection, so recall is effectively 100%.
+
+**Trade-offs:**
+- ✅ Best-in-class recall/latency (typically 95–99% recall@10 at millisecond latency on millions of vectors).
+- ✅ No training step, and it supports incremental inserts.
+- ❌ Memory-heavy: vectors plus links must be in RAM (10M × 1536 dims ≈ 61 GB before the links). The fixes are quantization, or IVF-PQ / DiskANN.
+- ❌ Deletes leave tombstones, and the graph degrades until it's rebuilt.
+- ❌ **Filtered search:** a very selective filter ("only AMZN FY2025", 5% of the data) removes most of the graph, and greedy search can get stuck. Databases handle this by filtering during the graph walk, or by switching to brute force for small filtered sets. That matters in Phase 2.
+
+**Other index types:**
+
+| Index | Idea | Use when |
+|---|---|---|
+| Flat | Brute force, exact | Fewer than ~100k vectors (like ours: about 1 ms) |
+| **HNSW** | Layered graph | The default, if you have the RAM |
+| IVF | k-means clusters; search the `nprobe` nearest clusters | Less memory; a training step is acceptable |
+| IVF-PQ | IVF plus vectors compressed to about 64 bytes | Billions of vectors |
+| DiskANN | Graph stored on SSD | Very large scale on one machine |
+
+**How to measure it:** recall@k = |HNSW top-k ∩ exact top-k| / k over a set of queries. Raise `ef_search` until recall reaches about 98% within your latency budget.
+
+**At our scale** brute force takes about 1 ms, so HNSW doesn't help yet. It pays off past roughly 100k vectors. Saying that in an interview shows you understand the trade-off rather than following defaults.
+
+### 📘 Deep dive: cosine distance vs similarity
+
+- **Cosine similarity** = cos θ, in [−1, 1]. Higher means more similar.
+- **Cosine distance** = 1 − cos θ, in [0, 2]. Lower means more similar. Chroma returns this.
+- `store.search()` converts it back: `score = 1 − distance`.
+- **Chroma's `hnsw:space` options:**
+  - `cosine`: distance = 1 − cos.
+  - `l2`: squared Euclidean. **This is Chroma's default.**
+  - `ip`: distance = 1 − dot product.
+- For unit vectors, all three rank results identically (Phase 0). We set `cosine` explicitly so the scores are interpretable.
+- **Gotcha:** forget `hnsw:space` and you get L2, and your "scores" become squared distances where lower is better. Code that sorts by "score" descending then silently returns the **worst** matches first.
+
 **Output:** a Chroma collection in `data/chroma/` (SQLite plus HNSW files) with 2,344 records.
 
 **How to check it worked:** it prints `indexed 2344 chunks into '10k_text-embedding-3-small_recursive350' ...`. The count must equal the number of JSONL lines, and the test queries should return the right company and section (the NVIDIA query → NVDA Item 1A).
@@ -348,6 +562,33 @@ gpt-4o-mini at **temperature 0**, so the same input gives a repeatable answer. T
 
 **Cost per question:** about 1,700 prompt tokens with k=5 and 350-token chunks. It grows roughly as k × chunk size.
 
+### 📘 Deep dive: the Chat Completions API, and prompting for grounded answers
+
+**The API.** `client.chat.completions.create(model, messages, temperature)`:
+- **`messages`** is a list of `{role, content}`:
+  - `system`: the rules (our `SYSTEM`).
+  - `user`: the context plus the question.
+  - `assistant`: previous model turns, if any.
+- The model is **stateless**. Everything it knows about this request comes from `messages`, which is exactly why RAG works by putting retrieved text into the prompt.
+- **`temperature`** controls sampling randomness. 0 means (nearly) always take the most likely token, so answers are repeatable, which is what you want for factual Q&A and evaluation. Higher values mean more varied output.
+- **Tokens and cost:** you pay for input tokens (≈1,700 here) plus output tokens. Input size grows with k × chunk size. gpt-4o-mini is cheap and fast; bigger models read long contexts more reliably.
+- **The context window** (128k for gpt-4o-mini) is a hard limit, but quality drops well before it. Models attend worse to the middle of long contexts ("lost in the middle"), so more chunks isn't automatically better.
+
+**Why each prompt rule exists:**
+
+| Rule | Guards against |
+|---|---|
+| "Use ONLY the numbered context passages" | The model answering from its training data (possibly outdated, or not from the filing) |
+| "Cite every claim with [n]" | Unverifiable answers. Citations let the user, and your eval, check the source |
+| "If not in the passages, say I don't know" | **Hallucination under missing context.** The retriever *always* returns k chunks, even for questions the corpus can't answer (Google: 0.50) |
+| "State units" | 10-K tables are in millions. "$416,161" without units is wrong by 10⁶ |
+| Source header per passage | Chunks say "we", not "Tesla". Without the header the model can't attribute facts |
+
+**Limits of prompt-only grounding:**
+- Citations are **claims, not proof**. The model can cite [3] for something [3] doesn't say.
+- Refusal is **probabilistic**. A weaker model or a tempting partial match can still produce a confident wrong answer.
+- Both are measured in Phase 4 (faithfulness, answer relevance) and hardened in Phase 6 (self-checking agents) and Phase 7 (guardrails).
+
 ### 4e. Report (`04_ask.py:66-76`)
 
 ```
@@ -397,6 +638,30 @@ Check retrieval before generation. This is the standard answer to "your RAG give
 | Vague questions ("Microsoft's revenue?") | Query rewriting, HyDE | 3 |
 | "We" chunks and tables without context; mixed-topic chunks | Contextual retrieval, parent-child chunks | 5 |
 | "Does it actually work?" | Golden set, recall@k, faithfulness | 4 |
+
+## Glossary (quick reference)
+
+| Term | One-line meaning |
+|---|---|
+| **10-K** | The annual report every US-listed company files with the SEC |
+| **CIK / accession number** | Permanent company ID / unique filing ID on EDGAR |
+| **iXBRL** | HTML with machine-readable tags around every financial number |
+| **Item** | A regulated section of a 10-K (1A Risk Factors, 7 MD&A, 8 Financials, ...) |
+| **Token / BPE** | Sub-word unit that models read / the algorithm that learns the vocabulary |
+| **Chunk** | A retrievable piece of a document (here ≤ 350 tokens, inside one Item) |
+| **Overlap** | Tokens repeated between neighbouring chunks, so boundary facts survive |
+| **Embedding** | A fixed-length vector representing a text's meaning |
+| **Asymmetric embedding** | Model that embeds queries differently from documents (BGE query prefix) |
+| **Collection** | Chroma's table: one embedding space, one index, one config |
+| **Segment** | Chroma storage unit: a metadata segment (SQLite) + a vector segment (HNSW) per collection |
+| **HNSW** | Layered proximity-graph index for approximate nearest-neighbour search |
+| **M / ef_construction / ef_search** | HNSW links per node / build beam width / query beam width |
+| **ANN / recall@k** | Approximate nearest neighbour / share of the true top-k that ANN returns |
+| **Cosine distance** | 1 − cosine similarity. Lower is closer |
+| **top-k** | The k best-scoring chunks returned by retrieval |
+| **Grounding** | Making the LLM answer from supplied context rather than its training data |
+| **Refusal path** | An explicit instruction and behaviour for "the answer isn't in the context" |
+| **Temperature** | Sampling randomness. 0 means repeatable output |
 
 ## Self-check before moving on
 - [ ] Explain why the Apple footer made a 2023 table rank above the correct 2025 table.
