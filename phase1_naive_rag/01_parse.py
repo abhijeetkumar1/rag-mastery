@@ -26,6 +26,14 @@ OUT_DIR = DATA_DIR / "processed"
 BLOCK_TAGS = ["p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "table"]
 # "Item 7." / "ITEM 7A. MANAGEMENT'S..." at line start, followed by a title
 ITEM_RE = re.compile(r"^item\s+(\d{1,2}[a-c]?)\s*[.:\-–—]?\s*(.*)$", re.I)
+# Page furniture repeated on every page: page numbers, "Table of Contents" back-links,
+# bare running headers ("PART II", "Item 8"), separator rules, and page footers like
+# "Apple Inc. | 2025 Form 10-K | 48". Adds noise to chunks and vectors.
+NOISE_RE = re.compile(
+    r"\d{1,3}|table of contents|part\s+i{1,3}v?|item\s+\d{1,2}[a-c]?|[_\-=]{3,}"
+    r"|[^|]{2,60}\|\s*\d{4}\s+form\s+10-k\s*\|\s*\d{1,3}",
+    re.I,
+)
 
 
 def html_to_text(html: str) -> str:
@@ -48,9 +56,10 @@ def html_to_text(html: str) -> str:
     text = soup.get_text("").replace("\xa0", " ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
-    lines = [ln for ln in text.split("\n") if not re.fullmatch(r"\d{1,3}", ln.strip())]  # page numbers
-    text = "\n".join(lines)
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
+    text = "\n".join(ln for ln in text.split("\n") if not NOISE_RE.fullmatch(ln.strip()))
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"^([•●▪])\n+", r"\1 ", text, flags=re.M)  # re-attach bullets split from their text
+    return text.strip()
 
 
 def split_sections(text: str) -> list[dict]:

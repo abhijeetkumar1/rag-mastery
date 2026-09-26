@@ -30,6 +30,7 @@ Most real RAG quality problems start **before** the vector DB. A 10-K's HTML is 
 | Headings split across `<span>`s (`ITEM 1. B` + `USINESS`) | Section detection fails | Join inline text and break lines only on block tags |
 | Table of contents and running page headers look like headings | Every "Item 1" page header opens a new section | Require a title after the item number, and treat a row ending in a page number as a TOC row |
 | Different filer layouts (AMZN puts headings in tables) | 0 sections found for AMZN | Handle the `Item 1. \| Business` row form |
+| Page furniture: "Table of Contents" back-links (up to 81 per filing), bare `PART II` / `Item 8` running headers, `____` rules, page footers (`Apple Inc. \| 2025 Form 10-K \| 48`, ~55 per AAPL filing), bullets split from their text | Repeated noise inside chunks dilutes the vectors and wastes prompt tokens | Drop lines matching a noise pattern, and re-attach lone bullets. Found by counting the most frequent short lines per file |
 | Financial tables | `get_text()` spreads each cell onto its own line, so numbers lose their labels | Flatten each row to `label \| v1 \| v2` |
 
 **Takeaway:** always *look at* your parsed text. The AMZN bug was found by printing section counts per file, not by any metric. In production you would use a proper parser (Unstructured, Docling, LlamaParse, or the XBRL data itself for numbers) and still spot-check the output.
@@ -51,7 +52,7 @@ We combine **structure-aware** (never cross an Item) with **recursive** (within 
 
 | | chunks | mean tokens | max |
 |---|---|---|---|
-| recursive 350/50 | 2,366 | 286 | 350 |
+| recursive 350/50 | 2,344 | 286 | 350 |
 | fixed 350/50 | 2,201 | 338 | 350 |
 
 **Chunk-size trade-off:** small chunks give precise vectors and match specific questions, but each carries little context (a table row without its header). Large chunks give rich context but a diluted vector, and fewer of them fit in the prompt. The usual range is 200–800 tokens. **Tune it with an eval set (Phase 4), not by intuition.**
@@ -95,6 +96,36 @@ Citations are *claims* by the model, not proof. The model can cite [3] for somet
 | MSFT vs AMZN revenue growth | ❌ "I don't know" | **All 5 hits are Microsoft.** A single query vector lands near one company, and top-k can't guarantee coverage |
 | Google ad revenue (not in the corpus) | ✅ refuses | Refusal works, **but** the retrieval scores (0.67–0.69) were almost as high as for real hits (0.70–0.83). The retriever always returns *something*, and scores can't tell you the answer is missing |
 | Tesla, reliance on Elon Musk (`03_index.py`) | ⚠️ rank 2, score 0.717 | The right chunk *starts* with customer credit risk and mentions Musk halfway through. **Mixed-topic chunks dilute the vector** |
+
+### Noise isn't neutral: the Apple footer experiment
+
+Before the footer fix, the #1 hit for *"Apple's total net sales in fiscal 2025"* was Apple's **2023** segment table (net sales 383,285). The LLM still answered correctly from hit #2. Why was the wrong table ranked first? Scores against the query (text-embedding-3-small):
+
+| Chunk | without footer | with `Apple Inc. \| 2025 Form 10-K \| 47` |
+|---|---|---|
+| 2023 segment table (wrong year) | 0.587 | **0.719** (+0.13) |
+| 2025 net-sales table (answer) | 0.696 | 0.707 |
+
+The table itself never says "Apple" or "2025". The footer injected both words, and that made a wrong-year table look like the answer. After the fix, the correct table is #1 and the 2023 table has dropped out of the top 5.
+
+Lessons:
+- Boilerplate doesn't just waste tokens. It can **inject false relevance signals**.
+- It also shows why **chunks lack context**. The footer was accidentally supplying entity and year, which the chunk text lacks. Phase 5 (contextual retrieval) adds that context *deliberately and correctly*: "Apple FY2025 10-K, Item 8, segment table for fiscal 2023".
+- `fiscal_year` metadata is the **filing** year. A 10-K reports three years of numbers, so filtering to FY2025 would *not* have excluded the 2023 table.
+
+### Same pipeline, two embedding models
+
+| | bge-small (local, 384d) | text-embedding-3-small (API, 1536d) |
+|---|---|---|
+| Real hits (top-1 scores) | 0.72–0.83 | 0.65–0.75 |
+| Out-of-corpus (Google) top-1 | 0.69 (**no gap** vs real hits) | 0.49 (**clear gap**) |
+| MSFT vs AMZN comparison | ❌ 5/5 MSFT | ❌ 5/5 MSFT |
+| Index time (2,366 chunks) | ~38 s on laptop | ~21 s, ≈ $0.01 |
+
+Lessons:
+- **Score scales are model-specific.** A threshold tuned for one model is meaningless for another.
+- The bigger model separates "irrelevant" from "relevant" better, which is useful if you ever calibrate a threshold.
+- **The comparison failure is identical with both models.** That makes it a *pipeline* problem (one query vector, blind top-k), not a model problem. Swapping in a better embedder won't fix architecture.
 
 ## 6. Where naive RAG breaks, and which phase fixes it
 

@@ -23,7 +23,9 @@ Embeddings run locally by default (`EMBED_PROVIDER=hf`, `BAAI/bge-small-en-v1.5`
 | 6 | 6 Agentic RAG | LangGraph agent: tool-based retrieval, self-correction (CRAG), multi-hop comparison | ReAct, when agents hurt |
 | 7 | 7 Production + review | FastAPI + streaming, caching, tracing, guardrails, cost/latency; system-design mock | "Design RAG for 10M docs" |
 
-Every phase folder contains runnable scripts plus a `NOTES.md` with theory, trade-offs, and interview Q&A.
+Every phase folder contains runnable scripts plus:
+- `WALKTHROUGH.md`: the architecture and a step-by-step explanation of the code. **Start here.**
+- `NOTES.md`: theory, trade-offs, interview Q&A and experiments.
 
 ## Dataset
 10-K annual reports for AAPL, MSFT, NVDA, TSLA and AMZN (two most recent fiscal years each), downloaded from SEC EDGAR by `phase1_naive_rag/00_download_10k.py`. Not committed; re-download with that script.
