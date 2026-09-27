@@ -95,6 +95,12 @@ Every one of these rules exists because a measured LLM error needed it (Steps 3�
 
 ---
 
+> **Changed later, in Phase 4.** Evaluation on a new question set found two more planner gaps, now fixed in `plan()`:
+> - **Filing years for explicit years are computed in code:** "fiscal 2024" → the FY2024 *and* FY2025 filings.
+> - **A covered company named → never refuse,** even if the model also lists an uncovered one ("Activision … in Microsoft's 10-K").
+>
+> With both, `05_route` scores **21/22** (was 20/22). The numbers below are from before these changes. See `phase4_evaluation/WALKTHROUGH.md` §2b.
+
 ## Step 0: Structured outputs and caching (`common/llm.py`)
 
 Every query-understanding call goes through **`chat_json(messages, schema)`** (`llm.py:102`):

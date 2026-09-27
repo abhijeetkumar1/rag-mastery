@@ -34,7 +34,8 @@ Every phase folder contains runnable scripts plus:
 ```
 common/        config (.env), embed/chat wrappers with cache, chunkers, Chroma store, tracer, guardrails,
                BM25, fusion (RRF), filters, reranker, hybrid Retriever, query intelligence (rewrite,
-               multi-query, HyDE, analyze/plan routing), structured LLM calls with cache
+               multi-query, HyDE, analyze/plan routing), structured LLM calls with cache, evaluation
+               (metrics, bootstrap, LLM judges)
 phase0_*/      one folder per phase: numbered scripts + NOTES.md
 data/          raw/ filings, processed/ text + chunks, chroma/ index, traces/ request traces (all git-ignored)
 ```

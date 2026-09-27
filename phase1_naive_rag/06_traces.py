@@ -77,10 +77,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--last", type=int, default=5, help="show timelines of the N most recent requests")
     ap.add_argument("--json", type=int, default=0, help="dump raw JSON of the N most recent traces")
-    ap.add_argument("--name", default="ask", help="trace name: ask (phase 1) or ask_v2 (phase 2)")
+    ap.add_argument("--name", default="ask", help="trace name: ask (phase 1), ask_v2 (phase 2), ask_v3 (phase 3)")
+    ap.add_argument("--tag", default=None, help="only traces with this tag (e.g. eval:test); default: untagged only")
     args = ap.parse_args()
 
-    traces = load_traces(args.name)
+    traces = [t for t in load_traces(args.name) if t["attrs"].get("tag") == args.tag]  # Phase 4 eval runs are tagged
     if not traces:
         raise SystemExit(f"No '{args.name}' traces yet: run the ask script of that phase first")
     if args.json:

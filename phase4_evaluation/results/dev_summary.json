@@ -1,0 +1,38 @@
+{
+ "P1 naive": {
+  "correct": 0.5370370370370371,
+  "correct_ci": [
+   0.4074074074074074,
+   0.6851851851851852
+  ],
+  "refused_ok": 1.0,
+  "false_refusals": 17,
+  "faithfulness": null,
+  "latency_p50_s": 0.9838920409674756,
+  "cost_per_q": 0.0002788983870967742
+ },
+ "P2 hybrid+rerank": {
+  "correct": 0.7592592592592593,
+  "correct_ci": [
+   0.6481481481481481,
+   0.8703703703703703
+  ],
+  "refused_ok": 1.0,
+  "false_refusals": 10,
+  "faithfulness": null,
+  "latency_p50_s": 1.4496527090086602,
+  "cost_per_q": 0.00025891451612903226
+ },
+ "P3 query intel.": {
+  "correct": 0.7592592592592593,
+  "correct_ci": [
+   0.6481481481481481,
+   0.8703703703703703
+  ],
+  "refused_ok": 1.0,
+  "false_refusals": 7,
+  "faithfulness": null,
+  "latency_p50_s": 1.4779601669870317,
+  "cost_per_q": 0.00032562338709677416
+ }
+}

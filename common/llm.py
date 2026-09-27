@@ -19,7 +19,9 @@ def client() -> OpenAI:
     global _client
     if _client is None:
         require_key()
-        _client = OpenAI()
+        # retries with exponential backoff, honouring the API's retry-after (429 rate limits, 5xx). Phase 4's
+        # judge runs hit gpt-4.1's 30k tokens/minute limit; the default of 2 retries wasn't enough.
+        _client = OpenAI(max_retries=8)
     return _client
 
 

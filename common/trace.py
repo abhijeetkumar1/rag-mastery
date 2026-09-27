@@ -7,6 +7,7 @@ This is the same data model as OpenTelemetry / Langfuse / LangSmith, just hand-r
 Written to data/traces/YYYY-MM-DD.jsonl. Read them back with load_traces() or phase1_naive_rag.06_traces.
 """
 import json
+import os
 import time
 import uuid
 from contextlib import contextmanager
@@ -19,6 +20,8 @@ TRACE_DIR = DATA_DIR / "traces"
 # USD per 1M tokens as (input, output). List prices at time of writing; verify at openai.com/api/pricing.
 PRICES = {
     "gpt-4o-mini": (0.15, 0.60),
+    "gpt-4.1": (2.00, 8.00),
+    "gpt-4.1-mini": (0.40, 1.60),
     "text-embedding-3-small": (0.02, 0.0),
 }
 
@@ -35,6 +38,8 @@ class Trace:
         self.id = uuid.uuid4().hex[:12]
         self.name = name
         self.attrs = dict(attrs)
+        if os.getenv("TRACE_TAG"):  # e.g. "eval:test": lets viewers separate evaluation runs from real traffic
+            self.attrs["tag"] = os.environ["TRACE_TAG"]
         self.spans: list[dict] = []
         self.started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
         self._t0 = time.perf_counter()

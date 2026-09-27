@@ -180,8 +180,10 @@ def plan(question: str, version: str = PROMPT_VERSION) -> tuple[dict, dict, list
     regex_tickers = extract_filters(question).get("ticker", [])
     companies = list(dict.fromkeys(a["companies"] + regex_tickers))
 
-    # 1. never refuse out_of_scope / unsupported (without an unsupported name) when a covered company is named
-    if companies and (a["route"] == "out_of_scope" or (a["route"] == "unsupported_company" and not a["unsupported_companies"])):
+    # 1. never refuse out_of_scope / unsupported_company when a covered company is named. (Phase 4 found the
+    #    second case: "...Activision Blizzard's senior notes, as referenced in Microsoft's 10-K" was refused because
+    #    Activision counted as an uncovered company, although the question is about Microsoft's filing.)
+    if companies and a["route"] in ("out_of_scope", "unsupported_company"):
         overrides.append(f"route {a['route']} -> answer: covered company named ({', '.join(companies)})")
         a["route"] = "answer"
     a["companies"] = companies
@@ -194,7 +196,17 @@ def plan(question: str, version: str = PROMPT_VERSION) -> tuple[dict, dict, list
                 overrides.append(f"added sub-question for {t}")
         if not a["sub_questions"]:
             a["sub_questions"] = [{"question": question, "ticker": None, "filing_years": []}]
-        # 3. deterministic vocabulary expansion per company
+        # 3. explicit years -> filings computed in code: year X is reported by the FY X filing AND by FY X+1
+        #    (comparative column). Phase 4 found the LLM sending "fiscal year 2024" to the FY2025 filing only,
+        #    missing facts stated only in the FY2024 10-K. The LLM's choice stays when no such filing is indexed.
+        cat = catalog()
+        for s in a["sub_questions"]:
+            years = {int(y) for y in re.findall(r"\b(20\d\d)\b", s["question"])}
+            want = sorted({y for x in years for y in (x, x + 1)} & set(cat.get(s["ticker"] or "", [])))
+            if want and want != sorted(s["filing_years"]):
+                overrides.append(f"filings {s['ticker']}: {s['filing_years']} -> {want}")
+                s["filing_years"] = want
+        # 4. deterministic vocabulary expansion per company
         for s in a["sub_questions"]:
             new = expand_terms(s["question"], s["ticker"])
             if new != s["question"]:

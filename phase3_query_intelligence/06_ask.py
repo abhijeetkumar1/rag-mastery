@@ -39,6 +39,37 @@ DEMO = [
 ]
 
 
+def retrieve_for_plan(R: Retriever, question: str, subs: list[dict], k: int = 6, use_multi: bool = False,
+                      use_hyde: bool = False, keep_original: bool = True, tr=None) -> list[dict]:
+    """Retrieval for a plan's sub-questions: k split across them, each with its own {ticker, filing_years} filter.
+    Separate from ask() so Phase 4 can evaluate retrieval without generating."""
+    tr = tr or Trace("retrieve_only")  # a throwaway trace when called outside ask(); never written (no end())
+    k_each = k if len(subs) == 1 else max(2, k // len(subs))
+    hits = []
+    for s in subs:
+        f = {**({"ticker": [s["ticker"]]} if s["ticker"] else {}),
+             **({"fiscal_year": s["filing_years"]} if s["filing_years"] else {})} or None
+        if use_multi:
+            with tr.span("multi_query") as sp:
+                qs, u = multi_query(s["question"])
+                sp.update(queries=qs, cached=u["cached"], cost_usd=cost_usd(CHAT_MODEL, u["input_tokens"], u["output_tokens"]))
+            sub_hits = R.retrieve_multi([s["question"], *qs], s["question"], k=k_each, filters=f, trace=tr)
+        elif keep_original and not use_hyde and s["question"] != question:
+            sub_hits = R.retrieve_multi([s["question"], question], s["question"], k=k_each, filters=f, trace=tr)
+        else:
+            passage = None
+            if use_hyde:
+                with tr.span("hyde") as sp:
+                    passage, u = hyde(s["question"])
+                    sp.update(passage=passage[:300], cached=u["cached"],
+                              cost_usd=cost_usd(CHAT_MODEL, u["input_tokens"], u["output_tokens"]))
+            sub_hits = R.retrieve(s["question"], k=k_each, filters=f, trace=tr, hyde_passage=passage)
+        for h in sub_hits:
+            h["sub_question"] = s["question"]
+        hits += sub_hits
+    return hits
+
+
 def ask(R: Retriever, question: str, k: int = 6, use_plan: bool = True, use_multi: bool = False,
         use_hyde: bool = False, tolerant: bool = True, keep_original: bool = True) -> tuple[str, list[dict], dict]:
     """keep_original: retrieve each sub-question with its rewrite AND the user's own words (RRF-fused). The planner
@@ -65,29 +96,7 @@ def ask(R: Retriever, question: str, k: int = 6, use_plan: bool = True, use_mult
         else:
             subs = [{"question": question, "ticker": None, "filing_years": []}]
 
-        k_each = k if len(subs) == 1 else max(2, k // len(subs))
-        hits = []
-        for s in subs:
-            f = {**({"ticker": [s["ticker"]]} if s["ticker"] else {}),
-                 **({"fiscal_year": s["filing_years"]} if s["filing_years"] else {})} or None
-            if use_multi:
-                with tr.span("multi_query") as sp:
-                    qs, u = multi_query(s["question"])
-                    sp.update(queries=qs, cached=u["cached"], cost_usd=cost_usd(CHAT_MODEL, u["input_tokens"], u["output_tokens"]))
-                sub_hits = R.retrieve_multi([s["question"], *qs], s["question"], k=k_each, filters=f, trace=tr)
-            elif keep_original and not use_hyde and s["question"] != question:
-                sub_hits = R.retrieve_multi([s["question"], question], s["question"], k=k_each, filters=f, trace=tr)
-            else:
-                passage = None
-                if use_hyde:
-                    with tr.span("hyde") as sp:
-                        passage, u = hyde(s["question"])
-                        sp.update(passage=passage[:300], cached=u["cached"],
-                                  cost_usd=cost_usd(CHAT_MODEL, u["input_tokens"], u["output_tokens"]))
-                sub_hits = R.retrieve(s["question"], k=k_each, filters=f, trace=tr, hyde_passage=passage)
-            for h in sub_hits:
-                h["sub_question"] = s["question"]
-            hits += sub_hits
+        hits = retrieve_for_plan(R, question, subs, k, use_multi, use_hyde, keep_original, tr)
 
         with tr.span("relevance_floor", floor=phase2.RELEVANCE_FLOOR) as sp:
             best = max((h.get("rerank_score", float("-inf")) for h in hits), default=float("-inf"))

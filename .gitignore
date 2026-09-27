@@ -22,3 +22,7 @@ CLAUDE.md
 
 # macOS
 .DS_Store
+
+# Phase 4: per-answer dumps are large and regenerable; summaries + baseline + golden sets are committed
+phase4_evaluation/results/*_answers.json
+phase4_evaluation/results/retrieval_runs.json
