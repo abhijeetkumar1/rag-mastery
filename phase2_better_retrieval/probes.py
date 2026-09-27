@@ -48,6 +48,11 @@ def hit_and_rr(ranked_ids: list[str], relevant: set[str], k: int) -> tuple[int, 
     return 0, 0.0
 
 
+def recall_at(ranked_ids: list[str], relevant: set[str], k: int) -> float:
+    """recall@k: share of ALL relevant chunks that are in the top k (hit@k only asks for one)."""
+    return len(set(ranked_ids[:k]) & relevant) / len(relevant)
+
+
 def load_rows(chunker: str = "recursive", size: int = 350) -> list[dict]:
     path = DATA_DIR / "processed" / f"chunks_{chunker}{size}.jsonl"
     return [json.loads(line) for line in path.read_text().splitlines()]

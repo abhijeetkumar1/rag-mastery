@@ -33,7 +33,7 @@ Probe hit@5: dense 8/12, BM25 8/12, but **BM25 4/4 on keyword probes and 1/4 on 
 ## 2. Fusion: RRF is a recall tool
 
 - **RRF** = Σ 1/(60 + rank). It uses ranks, because BM25 (0–30) and cosine (0.4–0.8) scores aren't comparable.
-- **Measured:** RRF has the **best recall@50 (11/12)** but the **worst hit@5 (7/12)**. It rewards agreement between the lists, so a chunk that dense ranked #1 and BM25 ranked #39 (the Tesla/Musk chunk) falls to #6.
+- **Measured:** RRF has the **best candidate pool** (hit@50 11/12, recall@50 0.88 vs 0.75 for dense or BM25 alone) but the **worst hit@5 (7/12)**. It rewards agreement between the lists, so a chunk that dense ranked #1 and BM25 ranked #39 (the Tesla/Musk chunk) falls to #6.
 - **Lesson:** hybrid without a reranker can be worse than dense alone. Fusion widens the candidate pool; something else must order it.
 
 ## 3. Filters: restrict, but don't guarantee

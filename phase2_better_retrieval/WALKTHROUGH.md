@@ -218,13 +218,13 @@ Min-max normalize each list's raw scores to [0,1], then take a weighted sum. It 
 ### 2c. The numbers (`evaluate()`, `02_hybrid_rrf.py:28`)
 
 ```
-mode                  hit@5  MRR@5  recall@50   keyword/semantic/numeric hit@5
-dense                   8/12   0.60       10/12   3/4  2/4  3/4
-bm25                    8/12   0.57       10/12   4/4  1/4  3/4
-score fusion 50/50      9/12   0.59       10/12   4/4  2/4  3/4
-rrf (k=60)              7/12   0.52       11/12   3/4  1/4  3/4
+mode                  hit@5  MRR@5  hit@50  recall@50   keyword/semantic/numeric hit@5
+dense                   8/12   0.60   10/12       0.75   3/4  2/4  3/4
+bm25                    8/12   0.57   10/12       0.75   4/4  1/4  3/4
+score fusion 50/50      9/12   0.59   10/12       0.79   4/4  2/4  3/4
+rrf (k=60)              7/12   0.52   11/12       0.88   3/4  1/4  3/4
 ```
-**RRF has the worst top-5 but the best recall@50.** Fusion's job is to get the right chunk *into the candidate pool*, and ordering is the reranker's job (Step 4). Hybrid without a reranker can be **worse** than dense alone. That's a common real-world surprise, and it's why "just add BM25" isn't a complete answer.
+**RRF has the worst top-5 but the best candidate pool:** hit@50 11/12, and **recall@50 0.88** against 0.75 for dense or BM25 alone. hit@50 asks "is *any* relevant chunk in the pool?"; recall@50 asks "what *share* of all relevant chunks is?". The gap between them (11/12 vs 0.88) means some relevant chunks still don't make it in. Fusion's job is to get the right chunk *into the candidate pool*, and ordering is the reranker's job (Step 4). Hybrid without a reranker can be **worse** than dense alone. That's a common real-world surprise, and it's why "just add BM25" isn't a complete answer.
 
 ### 📘 Deep dive: Reciprocal Rank Fusion
 
@@ -262,7 +262,11 @@ rrf (k=60)              7/12   0.52       11/12   3/4  1/4  3/4
 |---|---|---|
 | **hit@k** | 1 if *any* relevant chunk is in the top k | "Can the LLM see the answer?" |
 | **MRR@k** | Mean of 1/rank of the first relevant chunk (0 if none in the top k) | "How high is it?" Rank 1 = 1.0, rank 2 = 0.5, rank 5 = 0.2 |
-| **recall@50** | hit@50 here: is it in the candidate pool? | "Can the reranker possibly fix it?" |
+| **hit@50** | Any relevant chunk among the 50 candidates? | "Can the reranker possibly fix it?" |
+| **recall@k** (`recall_at()`) | Share of *all* relevant chunks in the top k | "Is *all* the evidence there?" Matters for comparisons and multi-part questions |
+| **precision@k** | Share of the top k that is relevant | "How much noise goes into the prompt?" Capped at (#relevant / k) when few chunks are relevant |
+
+**Example:** 3 relevant chunks, top 5 = `X R1 Y R2 Z` → hit@5 = 1, RR = 1/2, recall@5 = 2/3, precision@5 = 2/5.
 
 **Caveats:**
 - **Twelve probes is a sanity check, not an evaluation.** One query flipping moves hit@5 by 8 percentage points.
@@ -620,7 +624,8 @@ generate        1283.9 ms   tokens in/out: 1868/62
 | **N (candidates)** | How many fused results the reranker sees; a latency/recall knob |
 | **Relevance floor** | Refuse before generation if the best rerank score < threshold |
 | **Calibration** | Choosing a threshold from labeled score distributions, per model |
-| **hit@k / MRR / recall@k** | Any relevant chunk in the top k / mean 1/rank of the first / relevant chunk in the top k (pool) |
+| **hit@k / MRR** | Any relevant chunk in the top k / mean of 1/rank of the first relevant chunk |
+| **recall@k / precision@k** | Share of all relevant chunks found in the top k / share of the top k that is relevant |
 | **Ablation** | Turn one component off, keep everything else fixed, measure the difference |
 | **Cold start** | The first request paying one-time setup costs (model loading) |
 
