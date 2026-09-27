@@ -628,7 +628,7 @@ uv run python -m phase1_naive_rag.05_guardrails_demo      # 10 hand-written case
 ```
 In `04_ask.py` the checks run on every answer inside the `guardrails` span (`:69-71`), and the result is printed under each answer.
 
-### 5a. The checks: `check_answer(answer, passages)` (`guardrails.py:61`)
+### 5a. The checks: `check_answer(answer, passages)` (`guardrails.py:103`)
 
 ```
 report.refused            = is_refusal(answer)                      "I don't know based on the provided filings"
@@ -651,6 +651,8 @@ report.passed             = none of the three problems above
 **One asymmetry matters:** on the *answer* side, years (`2025`) and bare single digits are skipped as noise. On the *passage* side **every** number is kept.
 - **Why it matters:** the table cell `| 6 |` is the evidence for an answer's "grew 6%" (the parser dropped the separate `%` cell).
 - **The bug that taught this:** the first version skipped single digits on both sides, and flagged a correct "6%" answer as ungrounded. The trace kept a record of it.
+
+**Later improvement:** Phase 3 adds `check_answer(..., tolerant=True)` (`explain_derived()`, `guardrails.py:61`), which accepts unit conversions and growth rates computed from numbers on one table row. It fixes the two false positives below (8/10), and a tamper test confirms it still catches wrong numbers. Strict mode stays the default here.
 
 **Policy: warn, don't block.** `04_ask` prints `⚠` warnings and still shows the answer. Blocking needs high **precision**, and 5b shows this check doesn't have it.
 
@@ -752,7 +754,7 @@ One trace record (real, from your run):
 
 ### 6b. The viewer: `06_traces.py`
 
-**`summary()`** (`:37`) aggregates metrics across all traces. Real output after 6 questions:
+**`summary()`** (`:47`) aggregates metrics across all traces. Real output after 6 questions:
 ```
 == 6 requests ==
 latency   p50=1247 ms  p95=3226 ms  max=3526 ms
@@ -765,7 +767,7 @@ cost      total=$0.0018  per request=$0.00029  -> $29 per 100k requests
 quality   refusal rate=33%  guardrail warnings=17%  top-1 retrieval score mean=0.654
 ```
 
-**`timeline()`** (`:18`) shows one request as a waterfall. This is the same question asked twice:
+**`timeline()`** (`:19`) shows one request as a waterfall. This is the same question asked twice:
 ```
 total=3526 ms  [guardrails ⚠]                       ← first run (before the guardrail fix)
   embed_query     2352.5 ms  █████████████████████████████████      ← API call (cache miss)

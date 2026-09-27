@@ -317,7 +317,7 @@ fan-out (3 per ticker)  MSFT, AMZN, MSFT, AMZN, MSFT, AMZN
 ```
 **A filter restricts what *may* come back; it doesn't guarantee each value appears.** Microsoft's chunks simply score higher for this wording.
 
-**`retrieve_fanout()`** (`retriever.py:90`) runs one retrieval **per filter value** and interleaves the results, which guarantees coverage. This is the simplest form of **query decomposition**, which Phase 3 generalizes (LLM-generated sub-questions).
+**`retrieve_fanout()`** (`retriever.py:114`) runs one retrieval **per filter value** and interleaves the results, which guarantees coverage. This is the simplest form of **query decomposition**, which Phase 3 generalizes (LLM-generated sub-questions).
 
 **The filing-year pitfall:** "What was Apple's total net sales in fiscal 2023?"
 - **With the extracted filter {AAPL, 2023}:** *nothing*. We have no FY2023 filing.
@@ -368,7 +368,7 @@ CrossEncoder(RERANK_MODEL)                              lazy-loaded once (rerank
 predict([(query, chunk_1), ..., (query, chunk_50)])     one forward pass per pair, batches of 32
 → 50 raw logits (higher = more relevant)                ms-marco models: no sigmoid, range ≈ −11 … +10
 ```
-In `Retriever.retrieve()` (`retriever.py:78`) every candidate gets a `rerank_score`, the list is re-sorted, and the top k are kept.
+In `Retriever.retrieve()` (`retriever.py:83`) every candidate gets a `rerank_score`, the list is re-sorted, and the top k are kept.
 
 ### 4b. What it fixes: the Apple question
 
@@ -488,12 +488,24 @@ guardrails:          check_answer(answer, passages)   (Phase 1 output checks)   
 |---|---|---|---|
 | Apple FY2025 net sales | ✅ (after the footer fix) | ✅ all top 5 from FY2025 | Filter plus reranker |
 | NVIDIA export controls | ✅ | ✅ | Both fine |
-| MSFT vs AMZN growth | ❌ "I don't know" (5/5 MSFT) | ⚠️ **answered**: MSFT +16% ✅, AMZN "+15%, $36.6B" ❌ | Fan-out gave Amazon slots, but see below |
+| MSFT vs AMZN growth | ❌ "I don't know" (5/5 MSFT) | ❌ **answered, but both halves wrong**: MSFT "+16%, $19.2B" (a *segment*; the total is +18%, $50.1B), AMZN "+15%, $36.6B" (the truth is +12%) | Fan-out gave Amazon slots, but see 5c |
 | Google ad revenue | ✅ refused by the LLM | ✅ refused by the LLM | The floor can't catch it (on-topic chunks, 1.83) |
 | Dojo supercomputer | n/a | ✅ **refused before the LLM** (−4.99 < −3.0) | Relevance floor: no tokens spent |
 | Tesla reliant on CEO? | Musk chunk was dense #1 | ✅ answered from the Musk chunks [4][5] | Hybrid kept it in the candidates. The reranker preferred CEO-compensation notes (−2.76), just above the floor |
 
-### 5c. The Amazon answer: a caught hallucination, traced to its root cause
+### 5c. The comparison answer: two wrong numbers, traced to their root causes
+
+**Microsoft (found in Phase 3; the guardrail passed it):** "total revenue increased by $19.2 billion or 16% [1]". [1] says:
+```
+Reportable Segments / Fiscal Year 2026 Compared with Fiscal Year 2025 / Productivity and Business Processes
+Revenue increased $19.2 billion or 16%.
+```
+That's **one segment's** growth. Microsoft's total is "Revenue increased **$50.1 billion or 18%**" (`MSFT_FY2026_Item7_009`).
+- The sentence says just "Revenue increased", and the segment name is a heading a line above it. The LLM attached the number to the wrong entity: the segment instead of the company.
+- **The numeric guardrail passed it**, because 19.2 and 16 really are in the passage. This is the "real number, wrong label" false negative from the Phase 1 demo, now in a real answer.
+- **Fixes:** contextual chunk headers that say which segment a chunk covers (Phase 5), and a semantic faithfulness check (Phase 4).
+
+**Amazon:**
 
 The comparison answer claimed Amazon's "total revenue increased by $36.6 billion or 15% [6]". The truth, from Amazon's FY2025 income statement: **$637,959M → $716,924M, +12.4%**.
 

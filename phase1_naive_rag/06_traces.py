@@ -29,6 +29,11 @@ def timeline(t: dict) -> None:
         at = s["attrs"]
         if at.get("top"):
             print(f"  {'':14s} top: " + ", ".join(f"{x[0]} ({x[1]})" for x in at["top"][:3]))
+        if "route" in at:
+            print(f"  {'':14s} route={at['route']} companies={at.get('companies')} cached={at.get('cached')}"
+                  + (f" overrides={at['overrides']}" if at.get("overrides") else ""))
+            for sq in at.get("sub_questions", []):
+                print(f"  {'':14s}   sub: {sq}")
         if at.get("blocked") is not None:
             print(f"  {'':14s} best rerank score {at['best_score']} vs floor {at['floor']} -> blocked={at['blocked']}")
         if "hits" in at:
@@ -46,7 +51,8 @@ def summary(traces: list[dict]) -> None:
         for s in t["spans"]:
             spans.setdefault(s["name"], []).append(s["duration_ms"])
     gen = [s["attrs"] for t in traces for s in t["spans"] if s["name"] == "generate" and "input_tokens" in s["attrs"]]
-    cost = sum(g["cost_usd"] or 0 for g in gen)
+    # every LLM call records cost_usd (generate, and from Phase 3 also plan / multi_query / hyde)
+    cost = sum(s["attrs"].get("cost_usd") or 0 for t in traces for s in t["spans"])
     refused = sum(bool(t["attrs"].get("refused")) for t in traces)
     failed = sum(t["attrs"].get("guardrails_passed") is False for t in traces)
     top1 = [s["attrs"]["hits"][0]["score"] for t in traces for s in t["spans"]  # phase 1: cosine
@@ -61,8 +67,8 @@ def summary(traces: list[dict]) -> None:
     if gen:
         print(f"tokens    mean in={np.mean([g['input_tokens'] for g in gen]):.0f}  "
               f"mean out={np.mean([g['output_tokens'] for g in gen]):.0f}")
-        print(f"cost      total=${cost:.4f}  per request=${cost / len(gen):.5f}  "
-              f"-> ${cost / len(gen) * 1e5:.0f} per 100k requests")
+    print(f"cost      total=${cost:.4f}  per request=${cost / len(traces):.5f}  "
+          f"-> ${cost / len(traces) * 1e5:.0f} per 100k requests (all LLM calls, incl. refused requests)")
     print(f"quality   refusal rate={refused / len(traces):.0%}  guardrail warnings={failed / len(traces):.0%}  "
           + (f"top-1 retrieval score mean={np.mean(top1):.3f}" if top1 else ""))
 

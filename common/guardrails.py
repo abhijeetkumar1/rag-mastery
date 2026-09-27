@@ -58,12 +58,59 @@ def check_numeric_grounding(answer: str, passages: list[str]) -> list[str]:
     return sorted(in_answer - in_sources, key=lambda x: (len(x), x))
 
 
-def check_answer(answer: str, passages: list[str]) -> dict:
-    """Run all output checks. `passages` are the texts of the k passages in the prompt, in order."""
+def explain_derived(answer: str, numbers: list[str], passages: list[str], rel_tol: float = 0.002) -> dict[str, str]:
+    """For numbers not found verbatim: can they be DERIVED from the passage numbers? (Phase 3)
+      "716.9 billion"  ≈ 716,924 (millions) / 1000                   unit conversion, needs "billion" in the answer
+      "12.4%"          ≈ (716,924 / 637,959 − 1) · 100               growth, needs "%", both numbers on ONE line
+      "50.1 billion"   ≈ (331,839 − 281,724) / 1000                  difference, needs "billion", ONE line
+    A bare number with no unit must match verbatim. Returns {number: how it was derived}.
+
+    Why so strict: the first version allowed any unit and any pair of source numbers (~10,000 pairs), and a tamper
+    test showed it accepted WRONG numbers (15.3% and $736.9B passed; 12.4 was "explained" as 19817 − 7404).
+    Requiring the unit AND a single table row (where growth is actually computed) removes most coincidences."""
+    units = {}
+    for m in re.finditer(r"(\$?\d[\d,]*(?:\.\d+)?)\s*(%|percent|billion|million)?", CITE_RE.sub(" ", answer), re.I):
+        units.setdefault(_norm(m.group(1)), (m.group(2) or "").lower())
+    lines = [[float(n) for n in extract_numbers(line, skip_trivial=False) if float(n)]
+             for p in passages for line in p.split("\n")]
+    everything = sorted({y for line in lines for y in line})
+    out = {}
+    for raw in numbers:
+        x, unit = float(raw), units.get(raw, "")
+        decimals = len(raw.split(".")[1]) if "." in raw else 0
+        tol = max(rel_tol * abs(x), 0.5 * 10 ** -decimals)  # tolerate the answer's own rounding
+        if unit == "billion":
+            y = next((y for y in everything if abs(y / 1000 - x) <= tol), None)
+            if y is not None:
+                out[raw] = f"{y:g} million = {x:g} billion"
+                continue
+        for line in lines:
+            pairs = [(a, b) for a in line for b in line if a != b]
+            if unit in ("%", "percent"):
+                hit = next(((a, b) for a, b in pairs if abs((a / b - 1) * 100 - x) <= tol), None)
+                how = hit and f"growth ({hit[0]:g} / {hit[1]:g} − 1) · 100"
+            elif unit == "billion":
+                hit = next(((a, b) for a, b in pairs if a > b and abs((a - b) / 1000 - x) <= tol), None)
+                how = hit and f"difference ({hit[0]:g} − {hit[1]:g}) / 1000"
+            else:
+                hit = how = None
+            if hit:
+                out[raw] = how
+                break
+    return out
+
+
+def check_answer(answer: str, passages: list[str], tolerant: bool = False) -> dict:
+    """Run all output checks. `passages` are the texts of the k passages in the prompt, in order.
+    tolerant=True (Phase 3): numbers derivable from cited figures (unit conversion, growth %, difference)
+    are moved from ungrounded_numbers to derived_numbers instead of failing the check."""
     report = {"refused": is_refusal(answer), **check_citations(answer, len(passages))}
     valid = [n for n in report["cited"] if 1 <= n <= len(passages)]
     # verify numbers against what the answer CITED; if it cited nothing, against everything retrieved
     sources = [passages[n - 1] for n in valid] or passages
     report["ungrounded_numbers"] = [] if report["refused"] else check_numeric_grounding(answer, sources)
+    if tolerant and report["ungrounded_numbers"]:
+        report["derived_numbers"] = explain_derived(answer, report["ungrounded_numbers"], sources)
+        report["ungrounded_numbers"] = [n for n in report["ungrounded_numbers"] if n not in report["derived_numbers"]]
     report["passed"] = not (report["invalid_citations"] or report["uncited_answer"] or report["ungrounded_numbers"])
     return report

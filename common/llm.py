@@ -97,3 +97,22 @@ def chat_completion(messages: list[dict], model: str = CHAT_MODEL, temperature: 
 
 def chat(messages: list[dict], model: str = CHAT_MODEL, temperature: float = 0.0, **kw) -> str:
     return chat_completion(messages, model, temperature, **kw).choices[0].message.content
+
+
+def chat_json(messages: list[dict], schema: dict, name: str = "result", model: str = CHAT_MODEL,
+              cache: bool = True) -> tuple[dict, dict]:
+    """Structured output: the model MUST return JSON matching `schema` (OpenAI strict json_schema mode).
+    Returns (parsed_json, usage). Cached on disk by hash(model + messages + schema), like embeddings:
+    query-understanding calls repeat for the same question, and the cache makes reruns free and
+    deterministic. usage = {"input_tokens", "output_tokens", "cached"}."""
+    key = hashlib.sha256(json.dumps([model, messages, schema], sort_keys=True).encode()).hexdigest()
+    path = CACHE_DIR / "chat_json" / f"{key}.json"
+    if cache and path.exists():
+        return json.loads(path.read_text()), {"input_tokens": 0, "output_tokens": 0, "cached": True}
+    resp = chat_completion(messages, model, temperature=0.0, response_format={
+        "type": "json_schema", "json_schema": {"name": name, "schema": schema, "strict": True}})
+    out = json.loads(resp.choices[0].message.content)
+    if cache:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(out))
+    return out, {"input_tokens": resp.usage.prompt_tokens, "output_tokens": resp.usage.completion_tokens, "cached": False}

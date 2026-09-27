@@ -65,7 +65,8 @@ Probe hit@5: dense 8/12, BM25 8/12, but **BM25 4/4 on keyword probes and 1/4 on 
 
 ## 6. The Amazon case: every layer in one question
 
-"Compare Microsoft and Amazon revenue growth":
+"Compare Microsoft and Amazon revenue growth" (**both halves of the answer turned out wrong**):
+0. **Microsoft (found in Phase 3):** "+16%, $19.2B" is the *Productivity and Business Processes segment*. The total is +18%, $50.1B. The segment name sits in a heading above "Revenue increased...", and the numeric guardrail passed it (the numbers are in the passage).
 1. **Fan-out** gave Amazon slots, and the question got answered (Phase 1 said "I don't know").
 2. **But** the question says "revenue" and Amazon says "net sales", so every Amazon candidate scored below −2.5, and the top Amazon chunk was **Q1 2026 guidance**.
 3. **The LLM wrote "+15%, $36.6B".** The truth is **+12.4%** (637,959 → 716,924).
