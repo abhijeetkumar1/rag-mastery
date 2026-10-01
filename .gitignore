@@ -26,3 +26,6 @@ CLAUDE.md
 # Phase 4: per-answer dumps are large and regenerable; summaries + baseline + golden sets are committed
 phase4_evaluation/results/*_answers.json
 phase4_evaluation/results/retrieval_runs.json
+
+# Phase 5: same policy (answers are regenerable; summaries, retrieval summary and baseline are committed)
+phase5_advanced_indexing/results/*_answers.json

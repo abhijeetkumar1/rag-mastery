@@ -17,6 +17,7 @@ import warnings
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
 from common.config import DATA_DIR
+from common.structure import TABLE_END, TABLE_START  # Phase 5: sentinel lines around each <table>
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -36,13 +37,19 @@ NOISE_RE = re.compile(
 )
 
 
-def html_to_text(html: str) -> str:
+def html_to_text(html: str, mark_tables: bool = False) -> str:
+    """mark_tables (Phase 5): wrap every table in TABLE_START/TABLE_END lines, so a structure-aware chunker
+    knows where a table begins (its header rows) and ends. Off by default: Phase 1's output is unchanged."""
     soup = BeautifulSoup(html, "lxml")
     for t in soup.find_all(["ix:header", "script", "style"]):
         t.decompose()
     for t in soup.select('[style*="display:none"], [style*="display: none"]'):
         t.decompose()
 
+    if mark_tables:
+        for t in soup.find_all("table"):
+            t.insert_before(f"\n\n{TABLE_START}\n")
+            t.insert_after(f"\n{TABLE_END}\n\n")
     for tr in soup.find_all("tr"):
         cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
         cells = [c for c in cells if c and c not in {"$", "%", ")"}]  # drop split-off currency/paren cells

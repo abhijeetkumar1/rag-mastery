@@ -35,15 +35,20 @@ def main() -> None:
     ap.add_argument("--split", default="test")
     ap.add_argument("--pipeline", default="P3 query intel.")
     ap.add_argument("--update-baseline", action="store_true")
+    # Phase 5: its own summaries and baseline (new split, and faithfulness now judged with the source line)
+    ap.add_argument("--summary", type=Path, help="default: phase4_evaluation/results/<split>_summary.json")
+    ap.add_argument("--baseline", type=Path, default=BASELINE)
     args = ap.parse_args()
-    current = json.loads((HERE / "results" / f"{args.split}_summary.json").read_text())[args.pipeline]
+    summary = args.summary or HERE / "results" / f"{args.split}_summary.json"
+    current = json.loads(summary.read_text())[args.pipeline]
+    baseline = args.baseline
 
-    if args.update_baseline or not BASELINE.exists():
-        BASELINE.write_text(json.dumps({"split": args.split, "pipeline": args.pipeline, "metrics": current}, indent=1))
-        print(f"baseline written: {BASELINE.name} ({args.pipeline} on {args.split})")
+    if args.update_baseline or not baseline.exists():
+        baseline.write_text(json.dumps({"split": args.split, "pipeline": args.pipeline, "metrics": current}, indent=1))
+        print(f"baseline written: {baseline} ({args.pipeline} on {args.split})")
         return
 
-    base = json.loads(BASELINE.read_text())
+    base = json.loads(baseline.read_text())
     if (base["split"], base["pipeline"]) != (args.split, args.pipeline):
         sys.exit(f"baseline is for {base['pipeline']} on {base['split']}; pass matching --split/--pipeline")
     failures = []

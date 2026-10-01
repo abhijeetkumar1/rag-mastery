@@ -40,6 +40,16 @@ def timeline(t: dict) -> None:
             print(f"  {'':14s} top hits: " + ", ".join(f"{h['id']} ({h['score']:.3f})" for h in at["hits"][:3]))
         if "input_tokens" in at:
             print(f"  {'':14s} tokens in/out: {at['input_tokens']}/{at['output_tokens']}  cost: ${at['cost_usd']:.5f}")
+        if "mapping" in at:  # Phase 5: parent-child expansion
+            print(f"  {'':14s} {at['n_children']} children -> {at['n_parents']} parents, prompt tokens "
+                  f"{at['child_tokens']} (children) -> {at['parent_tokens']} (parents)")
+            for pid, via in at["mapping"][:3]:
+                print(f"  {'':14s}   {pid} <- {', '.join(v.rsplit('_', 1)[-1] for v in via)}")
+        if at.get("ctx_headers"):  # Phase 5: contextual headers of the passages the LLM saw
+            print(f"  {'':14s} index={at.get('index')} headers: " + "; ".join(h[:70] for h in at["ctx_headers"][:2]))
+        if s["name"] == "injection_scan":
+            print(f"  {'':14s} scanned {at['n']} passages, flagged {at['flagged'] or 'none'}"
+                  + (" (quarantined)" if at["flagged"] and at.get("quarantine") else ""))
         if at.get("ungrounded_numbers") or at.get("invalid_citations"):
             print(f"  {'':14s} ungrounded: {at.get('ungrounded_numbers')}  invalid cites: {at.get('invalid_citations')}")
 
@@ -77,7 +87,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--last", type=int, default=5, help="show timelines of the N most recent requests")
     ap.add_argument("--json", type=int, default=0, help="dump raw JSON of the N most recent traces")
-    ap.add_argument("--name", default="ask", help="trace name: ask (phase 1), ask_v2 (phase 2), ask_v3 (phase 3)")
+    ap.add_argument("--name", default="ask", help="trace name: ask (phase 1), ask_v2 (phase 2), ask_v3 (phase 3), ask_v5 (phase 5)")
     ap.add_argument("--tag", default=None, help="only traces with this tag (e.g. eval:test); default: untagged only")
     args = ap.parse_args()
 

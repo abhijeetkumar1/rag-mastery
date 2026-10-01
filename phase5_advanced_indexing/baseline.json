@@ -1,0 +1,17 @@
+{
+ "split": "test2",
+ "pipeline": "P5 structctx350",
+ "metrics": {
+  "correct": 0.8979591836734694,
+  "correct_ci": [
+   0.8163265306122449,
+   0.9795918367346939
+  ],
+  "refused_ok": 1.0,
+  "false_refusals": 0,
+  "faithfulness": 0.9659863945578232,
+  "prompt_tokens": 1996.4807692307693,
+  "latency_p50_s": 1.4766385830007493,
+  "cost_per_q": 0.0003075694444444444
+ }
+}

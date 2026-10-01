@@ -31,7 +31,8 @@ from common.guardrails import extract_numbers
 from common.llm import chat_json
 from phase2_better_retrieval.probes import load_rows
 
-SPLITS = {"dev": {"seed": 42, "per_stratum": 4}, "test": {"seed": 7, "per_stratum": 4}}  # 5 × 4 × 4 = 80 candidates
+SPLITS = {"dev": {"seed": 42, "per_stratum": 4}, "test": {"seed": 7, "per_stratum": 4},  # 5 × 4 × 4 = 80 candidates
+          "test2": {"seed": 13, "per_stratum": 4}}  # Phase 5's fresh held-out split (the old test was looked at in Phase 4)
 STRATA = {"business": ["Item 1"], "risk": ["Item 1A"], "mdna": ["Item 7"], "financials": ["Item 8", "Item 15"]}
 
 GEN_SCHEMA = {
@@ -212,6 +213,61 @@ TEST_REVIEW_DROPS = {
 }
 
 
+# Phase 5's fresh test split. Ground truth verified by text search in the chunks (2026-10-01), like the others.
+TEST2_COMPARISONS = [
+    ("Which company earned more net income in its latest fiscal year, Microsoft or NVIDIA?",
+     "Microsoft: $133,749 million in fiscal 2026, vs NVIDIA's $120,067 million in fiscal 2026.",
+     {"MSFT": ("MSFT_FY2026", r"Net income \| 133,749"), "NVDA": ("NVDA_FY2026", r"Net income \| 120,067")},
+     ["133,749", "120,067"]),
+    ("Compare the number of employees at Microsoft and Tesla at the end of their latest fiscal years.",
+     "Microsoft employed approximately 223,000 people full-time (June 30, 2026); Tesla's worldwide headcount was 134,785 (December 31, 2025).",
+     {"MSFT": ("MSFT_FY2026", r"approximately 223,000 people"), "TSLA": ("TSLA_FY2025", r"headcount worldwide was 134,785")},
+     ["223,000", "134,785"]),
+    ("Which company held more cash and cash equivalents at its latest fiscal year-end, Tesla or NVIDIA?",
+     "Tesla: $16,513 million (December 31, 2025), vs NVIDIA's $10,605 million (January 25, 2026).",
+     {"TSLA": ("TSLA_FY2025", r"Cash and cash equivalents \| 16,513"), "NVDA": ("NVDA_FY2026", r"Cash and cash equivalents \| 10,605")},
+     ["16,513", "10,605"]),
+    ("How much did Apple and Tesla spend on research and development in their latest fiscal years?",
+     "Apple: $34,550 million in fiscal 2025; Tesla: $6,411 million in 2025.",
+     {"AAPL": ("AAPL_FY2025", r"Research and development \| 34,550"), "TSLA": ("TSLA_FY2025", r"Research and development \| 6,411")},
+     ["34,550", "6,411"]),
+    ("Which company had more total assets at its latest fiscal year-end, Amazon or NVIDIA?",
+     "Amazon: $818,042 million (December 31, 2025), vs NVIDIA's $206,803 million (January 25, 2026).",
+     {"AMZN": ("AMZN_FY2025", r"Total assets \| 624,894 \| 818,042"), "NVDA": ("NVDA_FY2026", r"Total assets \| 206,803")},
+     ["818,042", "206,803"]),
+]
+TEST2_UNANSWERABLE = [
+    "What was Microsoft's revenue in fiscal 2018?",                # year not covered
+    "What was Intel's data center revenue in 2025?",               # company not covered
+    "What will Apple's net sales be in fiscal 2027?",              # future
+    "What did Tesla's CEO say on the most recent earnings call?",  # not in a 10-K
+    "Should I sell my Tesla shares now?",                          # investment advice
+]
+# Review of the generated TEST2 questions for QUALITY ONLY (no system was run on them, 2026-10-01). 10 of 54 dropped.
+TEST2_REVIEW_DROPS: dict[str, str] = {
+    "What are some of the areas of law and regulation that Apple was subject to in fiscal year 2024?":
+        "open-ended ('some of')",
+    "What types of laws regarding data protection is Apple subject to in fiscal year 2024?":
+        "vague: the reference ('a variety of ... laws') is not a fact you can grade",
+    "Did NVIDIA anticipate any material capital expenditures for environmental control facilities in fiscal year 2025?":
+        "yes/no",
+    "What is one reason NVIDIA's cash available for general business operations could be reduced, according to the 2026 10-K?":
+        "open-ended ('one reason')",
+    "Which NVIDIA equity incentive plan agreement was filed on March 11, 2019?":
+        "ambiguous: several exhibits share that filing date",
+    "What is one potential risk Tesla identifies in its 2025 10-K related to the CEO Performance Award and product development?":
+        "open-ended ('one potential risk')",
+    "As of December 31, 2024, has Tesla met the requirements under its operating lease arrangement for Gigafactory New York?":
+        "yes/no",
+    "What are some of the electronic devices that Amazon manufactured and sold in fiscal year 2025?":
+        "open-ended ('some of'); the same question was dropped from dev",
+    "Who are some of Amazon's main types of competitors mentioned in its 2025 10-K?":
+        "open-ended ('some of')",
+    "What are some of the payment methods Amazon accepted from customers in fiscal year 2025?":
+        "open-ended ('some of'); the same question was dropped from dev",
+}
+
+
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser()
@@ -219,14 +275,15 @@ def main() -> None:
     split = ap.parse_args().split
     cfg = SPLITS[split]
     out = Path(__file__).parent / f"golden_{split}.jsonl"
-    comparisons, unanswerable = (COMPARISONS, UNANSWERABLE) if split == "dev" else (TEST_COMPARISONS, TEST_UNANSWERABLE)
-    drops = REVIEW_DROPS if split == "dev" else TEST_REVIEW_DROPS
+    comparisons, unanswerable, drops = {"dev": (COMPARISONS, UNANSWERABLE, REVIEW_DROPS),
+                                        "test": (TEST_COMPARISONS, TEST_UNANSWERABLE, TEST_REVIEW_DROPS),
+                                        "test2": (TEST2_COMPARISONS, TEST2_UNANSWERABLE, TEST2_REVIEW_DROPS)}[split]
     rows = load_rows()
     rng = random.Random(cfg["seed"])
     used = set()
-    if split == "test":  # never reuse a chunk the dev set was generated from
-        dev = Path(__file__).parent / "golden_dev.jsonl"
-        used = {json.loads(line).get("source_chunk") for line in dev.read_text().splitlines()}
+    for earlier in {"dev": [], "test": ["dev"], "test2": ["dev", "test"]}[split]:  # never reuse an earlier split's chunk
+        path = Path(__file__).parent / f"golden_{earlier}.jsonl"
+        used |= {json.loads(line).get("source_chunk") for line in path.read_text().splitlines()}
     items, stats = [], {"sampled": 0, "unusable": 0, "bad_evidence": 0, "bad_numbers": 0, "critic_rejected": 0}
 
     for ticker in ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN"]:
