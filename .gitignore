@@ -29,3 +29,8 @@ phase4_evaluation/results/retrieval_runs.json
 
 # Phase 5: same policy (answers are regenerable; summaries, retrieval summary and baseline are committed)
 phase5_advanced_indexing/results/*_answers.json
+
+# Phase 6: Phoenix trace store (local server data) and per-answer dumps
+data/phoenix/
+phase6_agentic_rag/results/*_answers.json
+phase6_agentic_rag/results/*_smoke_*.json

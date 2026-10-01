@@ -32,7 +32,8 @@ from common.llm import chat_json
 from phase2_better_retrieval.probes import load_rows
 
 SPLITS = {"dev": {"seed": 42, "per_stratum": 4}, "test": {"seed": 7, "per_stratum": 4},  # 5 × 4 × 4 = 80 candidates
-          "test2": {"seed": 13, "per_stratum": 4}}  # Phase 5's fresh held-out split (the old test was looked at in Phase 4)
+          "test2": {"seed": 13, "per_stratum": 4},  # Phase 5's fresh held-out split (the old test was looked at in Phase 4)
+          "test3": {"seed": 21, "per_stratum": 4}}  # Phase 6's fresh split (Phase 5 read test2's failures)
 STRATA = {"business": ["Item 1"], "risk": ["Item 1A"], "mdna": ["Item 7"], "financials": ["Item 8", "Item 15"]}
 
 GEN_SCHEMA = {
@@ -268,6 +269,51 @@ TEST2_REVIEW_DROPS: dict[str, str] = {
 }
 
 
+# Phase 6's fresh split, plus phase6_agentic_rag/multihop.py TEST3. Ground truth verified by text search (2026-10-01).
+TEST3_COMPARISONS = [
+    ("Which company held more cash and cash equivalents at its latest fiscal year-end, Apple or Amazon?",
+     "Amazon: $86,810 million (December 31, 2025), vs Apple's $35,934 million (September 27, 2025).",
+     {"AAPL": ("AAPL_FY2025", r"Cash and cash equivalents \| 35,934"), "AMZN": ("AMZN_FY2025", r"Cash and cash equivalents \| 78,779 \| 86,810")},
+     ["86,810", "35,934"]),
+    ("Compare Apple's and NVIDIA's diluted earnings per share in their latest fiscal years.",
+     "Apple: $7.46 (fiscal 2025); NVIDIA: $4.90 (fiscal 2026).",
+     {"AAPL": ("AAPL_FY2025", r"Diluted \| 7\.46"), "NVDA": ("NVDA_FY2026", r"Diluted \| 4\.90")},
+     ["7.46", "4.90"]),
+    ("Which company had more total stockholders' equity at its latest fiscal year-end, Microsoft or Amazon?",
+     "Microsoft: $442,387 million (June 30, 2026), vs Amazon's $411,065 million (December 31, 2025).",
+     {"MSFT": ("MSFT_FY2026", r"Total stockholders’ equity \| 442,387"), "AMZN": ("AMZN_FY2025", r"Total stockholders’ equity \| 285,970 \| 411,065")},
+     ["442,387", "411,065"]),
+]
+TEST3_UNANSWERABLE = [
+    "What was Amazon's revenue in 2018?",                          # year not covered
+    "How many employees does Google have?",                        # company not covered
+    "What will Tesla's gross margin be in 2027?",                  # future
+    "Who will succeed Tim Cook as Apple's CEO?",                   # not in a 10-K
+    "Which of these five stocks should I buy for my retirement account?",  # investment advice
+]
+# Review of the generated TEST3 questions for QUALITY ONLY (no system was run on them, 2026-10-01). 9 of 46 dropped.
+TEST3_REVIEW_DROPS: dict[str, str] = {
+    "What does Apple identify as a principal competitive factor for its business in fiscal year 2024?":
+        "open-ended; the same question was dropped from dev",
+    "What changes did Apple implement in the EU in fiscal year 2024 to comply with the Digital Markets Act (DMA)?":
+        "open-ended list of changes",
+    "What is one competitive advantage Microsoft claims for Azure in fiscal year 2025?":
+        "open-ended ('one competitive advantage'); the same question was dropped from dev",
+    "Has NVIDIA experienced any security incidents involving employees posting company data on third-party websites without permission as of fiscal year 2025?":
+        "yes/no",
+    "As of fiscal year 2026, has the court reopened the In re NVIDIA Corporation Consolidated Derivative Litigation case against NVIDIA Corporation?":
+        "yes/no",
+    "Did NVIDIA have effective internal control over financial reporting as of January 25, 2026?":
+        "yes/no",
+    "Does Tesla expect the adoption of ASU No. 2025-05 to have a material impact on its consolidated financial statements for fiscal year 2025?":
+        "yes/no",
+    "Who are some of Amazon's main types of competitors mentioned in its 2025 10-K?":
+        "open-ended ('some of'); the same question was dropped from test2",
+    "Has Amazon experienced any past security incidents that materially affected its operating results, according to the 2025 10-K?":
+        "yes/no",
+}
+
+
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser()
@@ -277,11 +323,12 @@ def main() -> None:
     out = Path(__file__).parent / f"golden_{split}.jsonl"
     comparisons, unanswerable, drops = {"dev": (COMPARISONS, UNANSWERABLE, REVIEW_DROPS),
                                         "test": (TEST_COMPARISONS, TEST_UNANSWERABLE, TEST_REVIEW_DROPS),
-                                        "test2": (TEST2_COMPARISONS, TEST2_UNANSWERABLE, TEST2_REVIEW_DROPS)}[split]
+                                        "test2": (TEST2_COMPARISONS, TEST2_UNANSWERABLE, TEST2_REVIEW_DROPS),
+                                        "test3": (TEST3_COMPARISONS, TEST3_UNANSWERABLE, TEST3_REVIEW_DROPS)}[split]
     rows = load_rows()
     rng = random.Random(cfg["seed"])
     used = set()
-    for earlier in {"dev": [], "test": ["dev"], "test2": ["dev", "test"]}[split]:  # never reuse an earlier split's chunk
+    for earlier in {"dev": [], "test": ["dev"], "test2": ["dev", "test"], "test3": ["dev", "test", "test2"]}[split]:  # never reuse an earlier split's chunk
         path = Path(__file__).parent / f"golden_{earlier}.jsonl"
         used |= {json.loads(line).get("source_chunk") for line in path.read_text().splitlines()}
     items, stats = [], {"sampled": 0, "unusable": 0, "bad_evidence": 0, "bad_numbers": 0, "critic_rejected": 0}

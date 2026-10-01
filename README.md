@@ -37,7 +37,9 @@ common/        config (.env), embed/chat wrappers with cache, chunkers, Chroma s
                multi-query, HyDE, analyze/plan routing), structured LLM calls with cache, evaluation
                (metrics, bootstrap, LLM judges), document structure (tables with header rows),
                structure-aware chunking, contextual chunk headers / Contextual Retrieval, parent-child
-               retrieval, prompt-injection guardrails
+               retrieval, prompt-injection guardrails, agent tools / limits, ReAct agent and CRAG
+               (LangGraph), Phoenix tracing setup
 phase0_*/      one folder per phase: numbered scripts + NOTES.md
-data/          raw/ filings, processed/ text + chunks, chroma/ index, traces/ request traces (all git-ignored)
+data/          raw/ filings, processed/ text + chunks, chroma/ index, traces/ request traces,
+               phoenix/ Phase 6 trace store (all git-ignored)
 ```

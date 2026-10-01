@@ -1,0 +1,67 @@
+{
+ "P5": {
+  "correct": 0.85,
+  "correct_ci": [
+   0.75,
+   0.9333333333333333
+  ],
+  "refused_ok": 1.0,
+  "false_refusals": 5,
+  "faithfulness": 0.9272727272727272,
+  "prompt_tokens": 2043.553846153846,
+  "latency_p50_s": 1.483443332999741,
+  "cost_per_q": 0.00032354338235294117
+ },
+ "CRAG": {
+  "correct": 0.85,
+  "correct_ci": [
+   0.75,
+   0.9333333333333333
+  ],
+  "refused_ok": 1.0,
+  "false_refusals": 6,
+  "faithfulness": 0.9259259259259259,
+  "prompt_tokens": 5804.9384615384615,
+  "latency_p50_s": 4.213086625000869,
+  "cost_per_q": 0.000949122794117647
+ },
+ "CRAG-4.1": {
+  "correct": 0.9,
+  "correct_ci": [
+   0.8166666666666667,
+   0.9666666666666667
+  ],
+  "refused_ok": 1.0,
+  "false_refusals": 5,
+  "faithfulness": 0.9636363636363636,
+  "prompt_tokens": 6529.630769230769,
+  "latency_p50_s": 7.330913416997646,
+  "cost_per_q": 0.01166363088235294
+ },
+ "ReAct": {
+  "correct": 0.85,
+  "correct_ci": [
+   0.75,
+   0.9333333333333333
+  ],
+  "refused_ok": 1.0,
+  "false_refusals": 1,
+  "faithfulness": 0.8573446327683616,
+  "prompt_tokens": 7429.507692307692,
+  "latency_p50_s": 3.013387207996857,
+  "cost_per_q": 0.0022797485294117647
+ },
+ "Hybrid": {
+  "correct": 0.9,
+  "correct_ci": [
+   0.8166666666666667,
+   0.9666666666666667
+  ],
+  "refused_ok": 1.0,
+  "false_refusals": 4,
+  "faithfulness": 0.8988095238095238,
+  "prompt_tokens": 3611.8615384615387,
+  "latency_p50_s": 1.4923495830007596,
+  "cost_per_q": 0.0008671595588235294
+ }
+}

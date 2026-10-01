@@ -5,8 +5,10 @@ Run: uv run python -m phase5_advanced_indexing.04_index                 # all ch
 
 One collection per chunk set (common.store.collection_name): vectors of different chunkings must never mix, for the
 same reason vectors of different models must not. parent800 is NOT indexed: parents are looked up by id after the
-children are retrieved (common.parent_child). Embeddings are disk-cached per text, so re-indexing is cheap, but any
-change to the header format changes every text and re-embeds everything (~$0.02 per chunk set with OpenAI).
+children are retrieved (common.parent_child). `kind` (text|table) is stored as metadata too, so a retriever can be
+restricted to tables (Phase 6's search_tables tool: filters={"kind": ["table"]}). Embeddings are disk-cached per
+text, so re-indexing is cheap, but any change to the header format changes every text and re-embeds everything
+(~$0.02 per chunk set with OpenAI).
 """
 import argparse
 import json
@@ -34,7 +36,7 @@ def main() -> None:
         col = get_collection(collection_name(chunker, int(size)), reset=True)
         t0 = time.time()
         add_chunks(col, [r["id"] for r in rows], [r["text"] for r in rows],
-                   [{k: r[k] for k in ("ticker", "fiscal_year", "item", "section", "url")} for r in rows])
+                   [{k: r[k] for k in ("ticker", "fiscal_year", "item", "section", "url", "kind") if k in r} for r in rows])
         print(f"\n{name}: indexed {col.count()} chunks into '{col.name}' with {EMBED_MODEL} in {time.time() - t0:.1f}s")
         print(f"  Q: {QUERY}")
         for h in search(col, QUERY, k=3):

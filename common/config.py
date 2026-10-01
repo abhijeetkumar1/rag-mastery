@@ -24,6 +24,13 @@ CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 # stronger than) CHAT_MODEL, the model being graded: a model judging its own outputs is biased.
 JUDGE_MODEL = os.getenv("OPENAI_JUDGE_MODEL", "gpt-4.1")
 
+# Phase 6: model for CRAG's grader / rewriter / verifier (the LLM judgments inside the pipeline, not the offline judge)
+GRADER_MODEL = os.getenv("OPENAI_GRADER_MODEL", CHAT_MODEL)
+
+# Phase 6: local Arize Phoenix server for agent traces (start it with: uv run phoenix serve). PHOENIX_TRACING=0 disables.
+PHOENIX_ENDPOINT = os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "http://localhost:6006")
+PHOENIX_TRACING = os.getenv("PHOENIX_TRACING", "1") != "0"
+
 # SEC EDGAR requires "Name email" in the User-Agent of every request
 SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "")
 

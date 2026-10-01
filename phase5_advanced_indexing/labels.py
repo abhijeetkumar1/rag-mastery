@@ -11,7 +11,8 @@ import importlib
 import re
 
 golden = importlib.import_module("phase4_evaluation.01_build_golden")
-_PATTERNS = {q: per for q, _, per, _ in golden.COMPARISONS + golden.TEST_COMPARISONS + golden.TEST2_COMPARISONS}
+_PATTERNS = {q: per for q, _, per, _ in golden.COMPARISONS + golden.TEST_COMPARISONS + golden.TEST2_COMPARISONS
+             + golden.TEST3_COMPARISONS}
 
 
 def relabel(item: dict, rows: list[dict]) -> dict[str, int]:

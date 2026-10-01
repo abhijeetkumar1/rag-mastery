@@ -89,7 +89,7 @@ def grade(items: list[dict], runs: dict, faithfulness: bool) -> None:
                 r["unsupported_claims"] = [c["claim"] + " | " + c["check"] for c in f["claims"] if c["verdict"] != "supported"]
 
 
-def report(items: list[dict], runs: dict, split: str) -> dict:
+def report(items: list[dict], runs: dict, split: str, bases: tuple = ("P3", "P5 recursive350")) -> dict:
     ans = [i for i, x in enumerate(items) if x["expected"] == "answer"]
     una = [i for i, x in enumerate(items) if x["expected"] == "refuse"]
     print(f"\n== {split}: {len(ans)} answerable + {len(una)} unanswerable ==\n")
@@ -113,9 +113,9 @@ def report(items: list[dict], runs: dict, split: str) -> dict:
 
     names = list(runs)
     print("\nPaired differences in correctness (same answerable questions)")
-    for base in [b for b in ("P3", "P5 recursive350") if b in runs]:
+    for base in [b for b in bases if b in runs]:
         for n in names:
-            if n != base and not (base == "P5 recursive350" and n == "P3"):
+            if n != base and not (n in bases and bases.index(n) < bases.index(base)):
                 d, lo, hi, p = paired_bootstrap([runs[base][i]["correct"] for i in ans], [runs[n][i]["correct"] for i in ans])
                 print(f"  {n:20s} vs {base:16s} {d:+.3f} [{lo:+.3f},{hi:+.3f}]  p={p:.3f}" + ("  significant" if lo > 0 or hi < 0 else ""))
 
