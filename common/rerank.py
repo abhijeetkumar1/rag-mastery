@@ -6,9 +6,15 @@ Cross-encoder:           [CLS] query [SEP] chunk [SEP] -> one relevance score. A
                          negation, which entity a number belongs to... but it costs one model forward
                          pass per (query, chunk) pair, so only the top ~20-100 candidates get reranked.
 """
+import threading
+
 from common.config import HF_TOKEN, RERANK_MODEL
 
 _models: dict = {}
+# Phase 7: one inference at a time. On Apple's GPU (MPS), two threads calling predict() at once crash the process
+# (Metal: "A command encoder is already encoding to this command buffer"); the server's thread pool does exactly that.
+# Production would batch concurrent requests into one forward pass, or run the model in its own inference server.
+_lock = threading.Lock()
 
 
 def _model(name: str):
@@ -22,4 +28,7 @@ def rerank_scores(query: str, texts: list[str], model: str = RERANK_MODEL) -> li
     """Relevance score per text (higher = more relevant). ms-marco cross-encoders output a raw logit."""
     if not texts:
         return []
-    return [float(s) for s in _model(model).predict([(query, t) for t in texts], batch_size=32)]
+    m = _model(model)
+    with _lock:
+        scores = m.predict([(query, t) for t in texts], batch_size=32)
+    return [float(s) for s in scores]

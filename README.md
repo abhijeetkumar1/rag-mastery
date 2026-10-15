@@ -11,6 +11,8 @@ uv run python -m phase0_foundations.01_similarity
 
 Embeddings run locally by default (`EMBED_PROVIDER=hf`, `BAAI/bge-small-en-v1.5`); set `EMBED_PROVIDER=openai` to use the API instead. Chat always uses OpenAI.
 
+Phase 7 serves it as an API: `uv run python -m phase7_production.01_serve` (add `--stub` to run with no LLM calls), then `uv run python -m phase7_production.02_client "What was Apple's total net sales in fiscal 2025?"`.
+
 ## 7-day plan
 
 | Day | Phase | Build | Observability | Guardrails | Key interview topics |
@@ -38,8 +40,12 @@ common/        config (.env), embed/chat wrappers with cache, chunkers, Chroma s
                (metrics, bootstrap, LLM judges), document structure (tables with header rows),
                structure-aware chunking, contextual chunk headers / Contextual Retrieval, parent-child
                retrieval, prompt-injection guardrails, agent tools / limits, ReAct agent and CRAG
-               (LangGraph), Phoenix tracing setup
+               (LangGraph), Phoenix tracing setup; Phase 7: circuit breakers, response caches, PII redaction,
+               rate/spend limits, access control, moderation, a Qdrant adapter, OpenTelemetry + Prometheus telemetry
+phase7_production/   FastAPI service (streaming SSE) over the Phase 5 pipeline and Phase 6 agent, load test,
+               dashboard, online eval; NOTES.md has the "RAG for 10M docs" system-design mock
 phase0_*/      one folder per phase: numbered scripts + NOTES.md
 data/          raw/ filings, processed/ text + chunks, chroma/ index, traces/ request traces,
-               phoenix/ Phase 6 trace store (all git-ignored)
+               phoenix/ Phase 6 trace store, qdrant/ otel/ online_eval/ feedback/ dashboard.html (Phase 7)
+               (all git-ignored)
 ```

@@ -1,0 +1,79 @@
+[
+ {
+  "scenario": "concurrency 1",
+  "n": 48,
+  "ok": 48,
+  "cache_hits": 0,
+  "throughput_rps": 0.58,
+  "p50_s": 1.76,
+  "p95_s": 2.42,
+  "ttft_p50_s": 0.44,
+  "ttft_p95_s": 0.73
+ },
+ {
+  "scenario": "concurrency 4",
+  "n": 48,
+  "ok": 48,
+  "cache_hits": 0,
+  "throughput_rps": 2.11,
+  "p50_s": 1.82,
+  "p95_s": 2.78,
+  "ttft_p50_s": 0.47,
+  "ttft_p95_s": 1.26
+ },
+ {
+  "scenario": "concurrency 16",
+  "n": 48,
+  "ok": 48,
+  "cache_hits": 0,
+  "throughput_rps": 2.79,
+  "p50_s": 5.19,
+  "p95_s": 6.26,
+  "ttft_p50_s": 3.99,
+  "ttft_p95_s": 4.97
+ },
+ {
+  "scenario": "concurrency 4, repeats later",
+  "n": 48,
+  "ok": 48,
+  "cache_hits": 22,
+  "throughput_rps": 3.7,
+  "p50_s": 1.3,
+  "p95_s": 2.35,
+  "ttft_p50_s": 0.37,
+  "ttft_p95_s": 1.12
+ },
+ {
+  "scenario": "concurrency 4, repeats concurrent",
+  "n": 48,
+  "ok": 48,
+  "cache_hits": 0,
+  "throughput_rps": 2.06,
+  "p50_s": 1.79,
+  "p95_s": 2.76,
+  "ttft_p50_s": 0.55,
+  "ttft_p95_s": 1.19
+ },
+ {
+  "scenario": "concurrency 4, GUARDRAIL_MODE=buffer",
+  "n": 48,
+  "ok": 48,
+  "cache_hits": 0,
+  "throughput_rps": 2.09,
+  "p50_s": 1.85,
+  "p95_s": 2.67,
+  "ttft_p50_s": 1.84,
+  "ttft_p95_s": 2.67
+ },
+ {
+  "scenario": "concurrency 16, 2 workers",
+  "n": 48,
+  "ok": 48,
+  "cache_hits": 0,
+  "throughput_rps": 2.86,
+  "p50_s": 5.37,
+  "p95_s": 6.67,
+  "ttft_p50_s": 4.31,
+  "ttft_p95_s": 5.58
+ }
+]

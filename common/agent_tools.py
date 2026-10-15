@@ -95,11 +95,15 @@ def safe_eval(expr: str) -> float:
     return ev(ast.parse(expr.replace(",", ""), mode="eval").body)
 
 
-def make_tools(R, evidence: Evidence, trace=None) -> dict[str, StructuredTool]:
-    """Tools bound to one retriever and one run's Evidence. `trace` (common.trace.Trace) gets a span per call."""
+def make_tools(R, evidence: Evidence, trace=None, allowed_tickers=None) -> dict[str, StructuredTool]:
+    """Tools bound to one retriever and one run's Evidence. `trace` (common.trace.Trace) gets a span per call.
+    allowed_tickers (Phase 7 access control): the graph tool reads chunks by id, NOT through R.retrieve, so a filter on
+    the retriever alone would not cover it; its edges are restricted here to the filings the user may see."""
     from contextlib import nullcontext
     span = trace.span if trace else (lambda *a, **kw: nullcontext({}))
     edges = json.loads((DATA_DIR / "processed" / "graph_edges.json").read_text())
+    if allowed_tickers is not None:
+        edges = [e for e in edges if R.by_id[e["chunk"]]["ticker"] in allowed_tickers]
 
     def _search(query: str, company=None, fiscal_years=None, k: int = 5, tables_only: bool = False) -> str:
         f = {**({"ticker": [company]} if company else {}), **({"fiscal_year": fiscal_years} if fiscal_years else {}),

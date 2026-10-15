@@ -26,6 +26,7 @@ class Retriever:
         self.by_id = {r["id"]: r for r in self.rows}
         self.bm25 = BM25Index([r["text"] for r in self.rows])
         self.col = get_collection(collection_name(chunker, size))
+        self.degrade_dense = False  # Phase 7: True -> an embedding failure falls back to BM25 only
         if self.col.count() != len(self.rows):
             raise SystemExit(f"Index has {self.col.count()} chunks but {path.name} has {len(self.rows)}: "
                              f"rerun phase1_naive_rag.03_index")
@@ -40,6 +41,17 @@ class Retriever:
         vec = embed([query])[0] if as_document else embed_query(query)
         hits = search_by_vector(self.col, vec, k=n, where=to_chroma_where(f))
         return [(h["id"], h["score"]) for h in hits]
+
+    def _dense_or_skip(self, query: str, n: int, f: dict | None, as_document: bool, sp: dict) -> list[tuple[str, float]]:
+        """Phase 7: with degrade_dense=True, a failing query embedding (API down, circuit breaker open) degrades the search
+        to BM25 only instead of failing the request; the span records why. Phases 2-6 leave it False: errors raise."""
+        if not self.degrade_dense:
+            return self.dense(query, n, f, as_document=as_document)
+        try:
+            return self.dense(query, n, f, as_document=as_document)
+        except Exception as e:  # noqa: BLE001: any embedding failure -> BM25-only for this query
+            sp["degraded"] = f"{type(e).__name__}: {str(e)[:160]}"
+            return []
 
     def sparse(self, query: str, n: int, f: dict | None) -> list[tuple[str, float]]:
         return [(self.rows[i]["id"], s) for i, s in self.bm25.search(query, n, mask=to_mask(f, self.rows))]
@@ -60,9 +72,10 @@ class Retriever:
         lists = []
         if mode in ("dense", "hybrid"):
             with span("dense_search", n=n_candidates, hyde=hyde_passage is not None) as sp:
-                d = self.dense(hyde_passage or query, n_candidates, f, as_document=hyde_passage is not None)
+                d = self._dense_or_skip(hyde_passage or query, n_candidates, f, hyde_passage is not None, sp)
                 sp["top"] = [[i, round(s, 4)] for i, s in d[:10]]
-            lists.append([i for i, _ in d])
+            if d or not sp.get("degraded"):
+                lists.append([i for i, _ in d])
             for rank, (i, s) in enumerate(d, 1):
                 ranked.setdefault(i, {})["dense_rank"], ranked[i]["dense_score"] = rank, s
         if mode in ("bm25", "hybrid"):

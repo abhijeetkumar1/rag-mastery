@@ -20,6 +20,10 @@ EMBED_MODEL = HF_EMBED_MODEL if EMBED_PROVIDER == "hf" else OPENAI_EMBED_MODEL
 # Cross-encoder reranker (local sentence-transformers model), Phase 2+
 RERANK_MODEL = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+# OpenAI client retries/timeout. Batch jobs (evaluation) want many retries; a user-facing service wants few and a short
+# timeout, then its fallback (Phase 7, common/resilience.py): 8 retries with backoff during an outage = a minute of waiting.
+OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "8"))
+OPENAI_TIMEOUT_S = float(os.getenv("OPENAI_TIMEOUT_S", "600"))
 # Phase 4: model that GRADES answers / generates the golden set. Should differ from (and ideally be
 # stronger than) CHAT_MODEL, the model being graded: a model judging its own outputs is biased.
 JUDGE_MODEL = os.getenv("OPENAI_JUDGE_MODEL", "gpt-4.1")

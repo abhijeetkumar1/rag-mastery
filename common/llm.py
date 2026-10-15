@@ -5,14 +5,17 @@ Production RAG systems cache by hash(model + text). Interviewers like hearing th
 """
 import hashlib
 import json
+import threading
 
 import numpy as np
 from openai import OpenAI
 
-from common.config import CACHE_DIR, CHAT_MODEL, EMBED_MODEL, EMBED_PROVIDER, HF_TOKEN, require_key
+from common.config import (CACHE_DIR, CHAT_MODEL, EMBED_MODEL, EMBED_PROVIDER, HF_TOKEN, OPENAI_MAX_RETRIES,
+                           OPENAI_TIMEOUT_S, require_key)
 
 _client: OpenAI | None = None
 _hf_models: dict = {}
+_hf_lock = threading.Lock()  # Phase 7: concurrent encode() calls on MPS crash the process (see common/rerank.py)
 
 
 def client() -> OpenAI:
@@ -21,8 +24,15 @@ def client() -> OpenAI:
         require_key()
         # retries with exponential backoff, honouring the API's retry-after (429 rate limits, 5xx). Phase 4's
         # judge runs hit gpt-4.1's 30k tokens/minute limit; the default of 2 retries wasn't enough.
-        _client = OpenAI(max_retries=8)
+        _client = OpenAI(max_retries=OPENAI_MAX_RETRIES, timeout=OPENAI_TIMEOUT_S)
     return _client
+
+
+def configure_client(max_retries: int, timeout_s: float) -> None:
+    """Replace the shared client's retry/timeout policy (Phase 7's service: few retries, short timeout, then fallback)."""
+    global _client
+    require_key()
+    _client = OpenAI(max_retries=max_retries, timeout=timeout_s)
 
 
 def _hf_model(name: str):
@@ -39,9 +49,31 @@ def _hf_model(name: str):
 def _embed_batch(texts: list[str], model: str, provider: str) -> list[list[float]]:
     if provider == "hf":
         # normalize so dot == cosine, same as OpenAI's pre-normalized vectors
-        return _hf_model(model).encode(texts, normalize_embeddings=True).tolist()
+        m = _hf_model(model)
+        with _hf_lock:
+            return m.encode(texts, normalize_embeddings=True).tolist()
     resp = client().embeddings.create(model=model, input=texts)
     return [item.embedding for item in resp.data]
+
+
+# Phase 7: a circuit breaker (common.resilience) around the embedding API. Only REMOTE calls go through it: a cached
+# embedding is served even while the breaker is open. When open, a miss fails at once instead of after a timeout.
+embed_breaker = None
+
+
+def _guarded(fn, *args):
+    b = embed_breaker
+    if b is None:
+        return fn(*args)
+    if not b.allow():
+        raise RuntimeError("embedding API unavailable (circuit breaker open)")
+    try:
+        out = fn(*args)
+    except Exception as e:
+        b.failure(e)
+        raise
+    b.success()
+    return out
 
 
 def _cache_path(text: str, model: str):
@@ -70,7 +102,8 @@ def embed(
 
     for start in range(0, len(misses), batch_size):
         idx = misses[start : start + batch_size]
-        batch = _embed_batch([texts[i] for i in idx], model, provider)
+        batch = _guarded(_embed_batch, [texts[i] for i in idx], model, provider) if provider != "hf" else \
+            _embed_batch([texts[i] for i in idx], model, provider)
         for i, vec in zip(idx, batch):
             vectors[i] = vec
             p = _cache_path(texts[i], model)

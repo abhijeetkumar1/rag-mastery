@@ -1,0 +1,6 @@
+[
+  {"api_key": "demo-key-all", "id": "analyst-all", "tickers": null, "rpm": 60, "daily_usd": 1.0},
+  {"api_key": "demo-key-aapl", "id": "analyst-aapl", "tickers": ["AAPL"], "rpm": 60, "daily_usd": 0.25},
+  {"api_key": "demo-key-slow", "id": "trial-user", "tickers": null, "rpm": 3, "daily_usd": 0.002},
+  {"api_key": "demo-key-load", "id": "load-test", "tickers": null, "rpm": 1000000, "daily_usd": 1000.0}
+]

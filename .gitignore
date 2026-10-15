@@ -34,3 +34,10 @@ phase5_advanced_indexing/results/*_answers.json
 data/phoenix/
 phase6_agentic_rag/results/*_answers.json
 phase6_agentic_rag/results/*_smoke_*.json
+
+# Phase 7: local stores written by the service and scripts (regenerable; may hold user text, even if redacted)
+data/qdrant/
+data/otel/
+data/online_eval/
+data/feedback/
+data/dashboard.html
